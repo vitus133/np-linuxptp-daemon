@@ -95,7 +95,7 @@ func Test_ProcessProfileTBC(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 4, len(*commands))
 	// Test holdover exit
-	commands, err = clockChain.ExitHoldoverTBC()
+	commands, err = clockChain.EnterNormalTBC()
 	assert.NoError(t, err)
 	assert.Equal(t, 4, len(*commands))
 	// Test error cases

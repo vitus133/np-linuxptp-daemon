@@ -140,7 +140,6 @@ func InitClockChain(e810Opts E810Opts, nodeProfile *ptpv1.PtpProfile) (*ClockCha
 	if err != nil {
 		return chain, err
 	}
-
 	comps, err := chain.ResolveInterconnections(e810Opts, nodeProfile)
 	if err != nil {
 		glog.Errorf("fail to get delay compensations, %s", err)
@@ -153,11 +152,24 @@ func InitClockChain(e810Opts E810Opts, nodeProfile *ptpv1.PtpProfile) (*ClockCha
 	}
 	err = chain.GetLeadingCardSDP()
 	if err != nil {
+		glog.Fatal(err)
 		return chain, err
 	}
 	if chain.Type == ClockTypeTBC {
+		(*nodeProfile).PtpSettings["clockType"] = "T-BC"
+		glog.Info("about to init TBC pins")
 		_, err = chain.InitPinsTBC()
+		if err != nil {
+			panic(err)
+		}
+		glog.Info("about to enter TBC Normal mode")
+		_, err = chain.EnterNormalTBC()
+		if err != nil {
+			panic(err)
+		}
 	} else {
+		(*nodeProfile).PtpSettings["clockType"] = "T-GM"
+		glog.Info("about to init TGM pins")
 		_, err = chain.InitPinsTGM()
 	}
 	return chain, err
@@ -183,11 +195,11 @@ func (ch *ClockChain) GetLeadingCardSDP() error {
 			ch.LeadingNIC.pins[pin.BoardLabel] = *pin
 		}
 	}
-
 	return nil
 }
 
 func writeSysFs(path string, val string) error {
+	glog.Infof("writing " + val + " to " + path)
 	err := os.WriteFile(path, []byte(val), 0666)
 	if err != nil {
 		return fmt.Errorf("e810 failed to write " + val + " to " + path + ": " + err.Error())
@@ -248,14 +260,24 @@ func (c *ClockChain) SetPinsControlData(pins []string, enable []bool) (*[]dpll.P
 func (c *ClockChain) EnableE810Outputs() error {
 	// # echo 1 0 0 0 100 > /sys/class/net/$ETH/device/ptp/ptp*/period
 	// # echo 2 0 0 1 0 > /sys/class/net/$ETH/device/ptp/ptp*/period
-	pinPath := fmt.Sprintf("/sys/class/net/%s/device/ptp/ptp*/period", c.LeadingNIC.name)
+	var pinPath string
 	if unitTest {
-		pinPath = "/tmp/pin"
-	}
-	for _, value := range []string{"1 0 0 0 100", "2 0 0 1 0"} {
-		err := writeSysFs(pinPath, value)
+		glog.Info("skip pin config in unit test")
+		return nil
+	} else {
+		deviceDir := fmt.Sprintf("/sys/class/net/%s/device/ptp/", c.LeadingNIC.name)
+		phcs, err := os.ReadDir(deviceDir)
 		if err != nil {
-			return err
+			panic(fmt.Sprintf("e810 failed to read " + deviceDir + ": " + err.Error()))
+		}
+		for _, phc := range phcs {
+			pinPath = fmt.Sprintf("/sys/class/net/%s/device/ptp/%s/period", c.LeadingNIC.name, phc.Name())
+			for _, value := range []string{"1 0 0 0 100", "2 0 0 1 0"} {
+				err := writeSysFs(pinPath, value)
+				if err != nil {
+					panic(fmt.Errorf("failed to write " + value + " to " + pinPath + ": " + err.Error()))
+				}
+			}
 		}
 	}
 	return nil
@@ -294,8 +316,8 @@ func (c *ClockChain) EnterHoldoverTBC() (*[]dpll.PinParentDeviceCtl, error) {
 	return commands, BatchPinSet(commands)
 }
 
-// ExitHoldoverTBC configures the leading card DPLL pins for regular T-BC operation
-func (c *ClockChain) ExitHoldoverTBC() (*[]dpll.PinParentDeviceCtl, error) {
+// EnterNormalTBC configures the leading card DPLL pins for regular T-BC operation
+func (c *ClockChain) EnterNormalTBC() (*[]dpll.PinParentDeviceCtl, error) {
 	// Disable DPLL Outputs to e810 (SDP21, SDP23)
 	// Enable DPLL inputs from e810 (SDP20, SDP22)
 	pins := []string{sdp21, sdp23, sdp20, sdp22}
@@ -324,12 +346,14 @@ func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 	if unitTest {
 		return nil
 	}
+	glog.Infof("sending DPLL pin commands %+v", *commands)
 	conn, err := dpll.Dial(nil)
 	if err != nil {
 		return fmt.Errorf("failed to dial DPLL: %v", err)
 	}
 	defer conn.Close()
 	for _, command := range *commands {
+		glog.Infof("DPLL pin command %v", command)
 		b, err := dpll.EncodePinControl(command)
 		if err != nil {
 			return err

@@ -194,6 +194,9 @@ func OnPTPConfigChangeE810(data *interface{}, nodeProfile *ptpv1.PtpProfile) err
 				if err != nil {
 					return err
 				}
+				glog.Infof("clock chain %+v", clockChain)
+			} else {
+				glog.Error("no input delays set")
 			}
 		}
 	}

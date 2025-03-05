@@ -5,7 +5,9 @@ RUN make clean && make
 
 FROM quay.io/centos/centos:stream9
 
-RUN yum -y update && yum -y update glibc && yum --setopt=skip_missing_names_on_install=False -y install linuxptp ethtool hwdata synce4l && yum clean all
+COPY extra/linuxptp-4.4-1.el9_2.test72468.1.x86_64.rpm /
+RUN yum -y update && yum -y update glibc && yum --setopt=skip_missing_names_on_install=False -y install /linuxptp-4.4-1.el9_2.test72468.1.x86_64.rpm ethtool hwdata synce4l && yum clean all && \
+	rm /linuxptp-4.4-1.el9_2.test72468.1.x86_64.rpm
 
 
 RUN yum install -y gpsd-minimal
