@@ -111,6 +111,7 @@ func Test_applyProfile_TBC(t *testing.T) {
 	testDataFiles := []string{
 		"testdata/profile-tbc.yaml",
 	}
+
 	for i := range len(testDataFiles) {
 		mkPath(t)
 		profile, err := loadProfile(testDataFiles[i])

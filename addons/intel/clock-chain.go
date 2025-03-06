@@ -268,14 +268,14 @@ func (c *ClockChain) EnableE810Outputs() error {
 		deviceDir := fmt.Sprintf("/sys/class/net/%s/device/ptp/", c.LeadingNIC.name)
 		phcs, err := os.ReadDir(deviceDir)
 		if err != nil {
-			panic(fmt.Sprintf("e810 failed to read " + deviceDir + ": " + err.Error()))
+			return fmt.Errorf("e810 failed to read " + deviceDir + ": " + err.Error())
 		}
 		for _, phc := range phcs {
 			pinPath = fmt.Sprintf("/sys/class/net/%s/device/ptp/%s/period", c.LeadingNIC.name, phc.Name())
 			for _, value := range []string{"1 0 0 0 100", "2 0 0 1 0"} {
 				err := writeSysFs(pinPath, value)
 				if err != nil {
-					panic(fmt.Errorf("failed to write " + value + " to " + pinPath + ": " + err.Error()))
+					return fmt.Errorf("failed to write " + value + " to " + pinPath + ": " + err.Error())
 				}
 			}
 		}

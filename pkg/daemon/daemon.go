@@ -172,6 +172,8 @@ type ptpProcess struct {
 	haProfile         map[string][]string // stores list of interface name for each profile
 	syncERelations    *synce.Relations
 	c                 *net.Conn
+	trIfaceName       string // Time receiver interface name for T-BC clock monitoring
+	profileClockType  string
 }
 
 func (p *ptpProcess) Stopped() bool {
@@ -653,8 +655,13 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			ptpClockThreshold: getPTPThreshold(nodeProfile),
 			haProfile:         haProfile,
 			syncERelations:    relations,
+			profileClockType:  profileClockType,
 		}
-
+		if pProcess == ptp4lProcessName {
+			if profileClockType == "T-BC" {
+				dprocess.trIfaceName, _ = (*nodeProfile).PtpSettings["leadingInterface"]
+			}
+		}
 		// TODO HARDWARE PLUGIN for e810
 		if pProcess == ts2phcProcessName { //& if the x plugin is enabled
 			if profileClockType != "T-BC" {
@@ -915,6 +922,13 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool) {
 					if p.name == ptp4lProcessName {
 						if strings.Contains(output, ClockClassChangeIndicator) {
 							go p.updateClockClass(nil)
+						}
+						if p.profileClockType == "T-BC" && strings.Contains(output, p.trIfaceName) {
+							if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
+								glog.Info("T-BC MOVE TO NORMAL")
+							} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") {
+								glog.Info("T-BC MOVE TO HOLDOVER")
+							}
 						}
 					} else if p.name == phc2sysProcessName && len(p.haProfile) > 0 {
 						p.announceHAFailOver(nil, output) // do not use go routine since order of execution is important here

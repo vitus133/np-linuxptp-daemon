@@ -1,11 +1,9 @@
 package intel
 
 import (
-	"encoding/json"
 	"os"
 	"testing"
 
-	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/yaml"
@@ -23,15 +21,16 @@ func loadProfile(path string) (*ptpv1.PtpProfile, error) {
 	}
 	return &profile, nil
 }
-func loadPins(path string) (*[]dpll.PinInfo, error) {
-	pins := &[]dpll.PinInfo{}
-	ptext, err := os.ReadFile(path)
-	if err != nil {
-		return pins, err
-	}
-	err = json.Unmarshal([]byte(ptext), pins)
-	return pins, err
-}
+
+// func loadPins(path string) (*[]dpll.PinInfo, error) {
+// 	pins := &[]dpll.PinInfo{}
+// 	ptext, err := os.ReadFile(path)
+// 	if err != nil {
+// 		return pins, err
+// 	}
+// 	err = json.Unmarshal([]byte(ptext), pins)
+// 	return pins, err
+// }
 
 func Test_initInternalDelays(t *testing.T) {
 	delays, err := InitInternalDelays("E810-XXVDA4T")
@@ -75,14 +74,14 @@ func Test_ProcessProfileTBC(t *testing.T) {
 	// Can read T-BC test profile
 	profile, err := loadProfile("./testdata/profile-tbc.yaml")
 	assert.NoError(t, err)
-	// Can read DPLL test data
-	pins, err := loadPins("./testdata/dpll-pins.json")
-	assert.NoError(t, err)
+	// // Can read DPLL test data
+	// pins, err := loadPins("./testdata/dpll-pins.json")
+	// assert.NoError(t, err)
 
-	// Mock DPLL pins
-	for _, pin := range *pins {
-		DpllPins = append(DpllPins, &pin)
-	}
+	// // Mock DPLL pins
+	// for _, pin := range *pins {
+	// 	DpllPins = append(DpllPins, &pin)
+	// }
 
 	// Can run PTP config change handler without errors
 	err = OnPTPConfigChangeE810(nil, profile)

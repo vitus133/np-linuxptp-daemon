@@ -131,6 +131,16 @@ func OnPTPConfigChangeE810(data *interface{}, nodeProfile *ptpv1.PtpProfile) err
 			// for unit testing only, PtpSettings may include "unitTest" key. The value is
 			// the path where resulting configuration files will be written, instead of /var/run
 			_, unitTest = (*nodeProfile).PtpSettings["unitTest"]
+			if unitTest {
+				pins, err := loadPins("./testdata/dpll-pins.json")
+				if err != nil {
+					panic(err)
+				}
+				// Mock DPLL pins
+				for _, pin := range *pins {
+					DpllPins = append(DpllPins, &pin)
+				}
+			}
 
 			if e810Opts.EnableDefaultConfig {
 				stdout, _ = exec.Command("/usr/bin/bash", "-c", EnableE810PTPConfig).Output()
@@ -194,9 +204,9 @@ func OnPTPConfigChangeE810(data *interface{}, nodeProfile *ptpv1.PtpProfile) err
 				if err != nil {
 					return err
 				}
-				glog.Infof("clock chain %+v", clockChain)
+				(*nodeProfile).PtpSettings["leadingInterface"] = clockChain.LeadingNIC.name
 			} else {
-				glog.Error("no input delays set")
+				glog.Error("no clock chain set")
 			}
 		}
 	}
@@ -311,4 +321,14 @@ func getClockIdE810(device string) uint64 {
 		break
 	}
 	return binary.LittleEndian.Uint64(b[offset+PCI_EXT_CAP_DATA_OFFSET:])
+}
+
+func loadPins(path string) (*[]dpll_netlink.PinInfo, error) {
+	pins := &[]dpll_netlink.PinInfo{}
+	ptext, err := os.ReadFile(path)
+	if err != nil {
+		return pins, err
+	}
+	err = json.Unmarshal([]byte(ptext), pins)
+	return pins, err
 }
