@@ -12,6 +12,7 @@ plugins:
     - id: ens4f0
       part: E810-XXVDA4T
       gnssInput: false
+      upstreamPort: ens4f0
       phaseOutputConnectors:
       - SMA1
       - SMA2

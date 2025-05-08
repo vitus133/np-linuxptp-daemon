@@ -430,3 +430,139 @@ func sendEvents(cfgName string, iface string, processName event.EventSource, sta
 		Reset:       false,
 	}
 }
+
+func sendEventsBC(cfgName string, iface string, processName event.EventSource, state event.PTPState,
+	values map[event.ValueType]interface{}, outOfSpec bool, sourceLost bool) event.EventChannel {
+	glog.Info("sending Nav status event to event handler Process")
+	return event.EventChannel{
+		ProcessName: processName,
+		State:       state,
+		IFace:       iface,
+		CfgName:     cfgName,
+		Values:      values,
+		SourceLost:  sourceLost,
+		ClockType:   "BC",
+		Time:        0,
+		OutOfSpec:   outOfSpec,
+		WriteToLog:  true,
+		Reset:       false,
+	}
+}
+func TestEventHandler_ProcessTBCEvents(t *testing.T) {
+	monkeyPatch()
+	tests := []PTPEvents{
+		{
+			processName:      event.TS2PHCProcessName,
+			cfgName:          "ts2phc.0.config",
+			clockState:       event.PTP_LOCKED,
+			outOfSpec:        false,
+			iface:            "ens8f0",
+			wantProcessState: "ts2phc[0]:[ts2phc.0.config] ens8f0 offset -25 s2",
+			values:           map[event.ValueType]interface{}{event.OFFSET: -25},
+		},
+		{
+			processName:      event.TS2PHCProcessName,
+			cfgName:          "ts2phc.0.config",
+			clockState:       event.PTP_LOCKED,
+			outOfSpec:        false,
+			iface:            "ens5f0",
+			values:           map[event.ValueType]interface{}{event.OFFSET: -25},
+			wantProcessState: "ts2phc[0]:[ts2phc.0.config] ens5f0 offset -25 s2",
+		},
+		{
+			processName:      event.DPLL,
+			cfgName:          "ts2phc.0.config",
+			clockState:       event.PTP_LOCKED,
+			outOfSpec:        false,
+			iface:            "ens4f0",
+			wantProcessState: "dpll[0]:[ts2phc.0.config] ens4f0 frequency_status 4 offset 0 phase_status 3 pps_status 1 s2",
+			values:           map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 4, event.LEADING_SOURCE: true, event.OFFSET: 0, event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
+		},
+		{
+			processName:      event.DPLL,
+			cfgName:          "ts2phc.0.config",
+			clockState:       event.PTP_LOCKED,
+			outOfSpec:        false,
+			iface:            "ens5f0",
+			wantProcessState: "dpll[0]:[ts2phc.0.config] ens5f0 frequency_status 3 offset 0 phase_status 3 pps_status 1 s2",
+			values:           map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 3, event.LEADING_SOURCE: false, event.OFFSET: 0, event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
+		},
+		{
+			processName: event.DPLL,
+			cfgName:     "ts2phc.0.config",
+			clockState:  event.PTP_LOCKED,
+			outOfSpec:   false,
+			iface:       "ens8f0",
+			values:      map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 3, event.LEADING_SOURCE: false, event.OFFSET: 0, event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
+		},
+		{
+			processName: event.PTP4l,
+			cfgName:     "ptp4l.0.config",
+			clockState:  event.PTP_LOCKED,
+			outOfSpec:   false,
+			iface:       "ens4f0",
+			values:      map[event.ValueType]interface{}{},
+		},
+		{
+			processName: event.DPLL,
+			cfgName:     "ts2phc.0.config",
+			clockState:  event.PTP_LOCKED,
+			outOfSpec:   false,
+			iface:       "ens4f0",
+			values:      map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 4, event.LEADING_SOURCE: true, event.OFFSET: 0, event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
+		},
+	}
+
+	logOut := make(chan string, 100)
+	eChannel := make(chan event.EventChannel, 100)
+	closeChn := make(chan bool)
+	go listenToEvents(closeChn, logOut)
+	eventManager := event.Init("node", true, "/tmp/go.sock", eChannel, closeChn, nil, nil, nil)
+	eventManager.MockEnable()
+	go eventManager.ProcessEvents()
+	assert.NoError(t, leap.MockLeapFile())
+	defer func() {
+		close(leap.LeapMgr.Close)
+		// Sleep to allow context to switch
+		time.Sleep(100 * time.Millisecond)
+		assert.Nil(t, leap.LeapMgr)
+	}()
+	time.Sleep(1 * time.Second)
+	for _, test := range tests {
+		select {
+		case eChannel <- sendEventsBC(test.cfgName, test.iface, test.processName, test.clockState, test.values, test.outOfSpec, test.sourceLost):
+			log.Println("sent data to channel")
+			log.Println(test.cfgName, test.processName, test.clockState, test.outOfSpec, test.values)
+			time.Sleep(1 * time.Second)
+		default:
+			log.Println("nothing to read")
+		}
+	retry:
+		for i := 0; i < len(logOut); i++ {
+			select {
+			case c := <-logOut:
+				s1 := strings.Index(c, "[")
+				s2 := strings.Index(c, "]")
+				rs := strings.Replace(c, c[s1+1:s2], "0", -1)
+
+				if strings.HasPrefix(c, string(test.processName)) {
+					assert.Equal(t, test.wantProcessState, rs, test.desc)
+				}
+				if strings.HasPrefix(c, "GM[") {
+					assert.Equal(t, test.wantGMState, rs, test.desc)
+				}
+				if strings.HasPrefix(c, "ptp4l[") {
+					assert.Equal(t, test.wantClockState, rs, test.desc)
+				}
+			default:
+			}
+			if len(logOut) > 0 {
+				goto retry
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	closeChn <- true
+	time.Sleep(1 * time.Second)
+}

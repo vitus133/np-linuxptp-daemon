@@ -515,12 +515,15 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 
 	var clockType event.ClockType
 	profileClockType, found := (*nodeProfile).PtpSettings["clockType"]
+	var leadingNic, upstreamPort string // Used below to set event source
 	if found {
 		switch profileClockType {
 		case "T-GM":
 			clockType = event.GM
 		case "T-BC":
 			clockType = event.BC
+			leadingNic, _ = (*nodeProfile).PtpSettings["leadingInterface"]
+			upstreamPort, _ = (*nodeProfile).PtpSettings["upstreamPort"]
 		default:
 			clockType = event.ClockUnset
 		}
@@ -658,6 +661,9 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		} else {
 			configOutput, ifaces = output.renderPtp4lConf()
 			for i := range ifaces {
+				if upstreamPort != "" && leadingNic == ifaces[i].Name {
+					ifaces[i].Source = event.PTP4l
+				}
 				ifaces[i].PhcId = ptpnetwork.GetPhcId(ifaces[i].Name)
 			}
 		}
@@ -692,11 +698,10 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			syncERelations:    relations,
 		}
 
-		if pProcess == ptp4lProcessName {
-			if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
-				dprocess.trIfaceName = port
-			}
+		if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
+			dprocess.trIfaceName = port
 		}
+
 		// TODO HARDWARE PLUGIN for e810
 		if pProcess == ts2phcProcessName { //& if the x plugin is enabled
 			if clockType == event.GM {
@@ -704,7 +709,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 					output.gnss_serial_port = GPSPIPE_SERIALPORT
 				}
 				// TODO: move this to plugin or call it from hwplugin or leave it here and remove Hardcoded
-				gmInterface := dprocess.ifaces.GetGMInterface().Name
+				gmInterface := dprocess.ifaces.GetLeadingInterface().Name
 
 				if e := mkFifo(); e != nil {
 					glog.Errorf("Error creating named pipe, GNSS monitoring will not work as expected %s", e.Error())
@@ -752,7 +757,8 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			phaseOffsetPinFilter := map[string]string{}
 			for _, iface := range dprocess.ifaces {
 				var eventSource []event.EventSource
-				if iface.Source == event.GNSS || iface.Source == event.PPS {
+				if iface.Source == event.GNSS || iface.Source == event.PPS ||
+					(iface.Source == event.PTP4l && profileClockType == "T-BC") {
 					glog.Info("Init dpll: ptp settings ", (*nodeProfile).PtpSettings)
 					for k, v := range (*nodeProfile).PtpSettings {
 						glog.Info("Init dpll: ptp kv ", k, " ", v)
@@ -780,11 +786,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 							clockId = i
 						}
 					}
-					if iface.Source == event.PPS {
-						eventSource = []event.EventSource{event.PPS}
-					} else {
-						eventSource = []event.EventSource{event.GNSS}
-					}
+					eventSource = []event.EventSource{iface.Source}
 					// pass array of ifaces which has source + clockId -
 					// here we have multiple dpll objects identified by clock id
 					// depends on will be either PPS or  GNSS,
@@ -932,7 +934,7 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 	if regexErr != nil {
 		glog.Infof("Failed parsing regex %s for %s: %d.  Defaulting to accept all", p.logFilterRegex, p.configName, regexErr)
 	}
-
+	profileClockType, pctFound := p.nodeProfile.PtpSettings["clockType"]
 	for {
 		glog.Infof("Starting %s...", p.name)
 		glog.Infof("%s cmd: %+v", p.name, p.cmd)
@@ -960,14 +962,18 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 						if strings.Contains(output, ClockClassChangeIndicator) {
 							go p.updateClockClass(nil)
 						}
-						if p.clockType == event.BC && strings.Contains(output, p.trIfaceName) {
-							if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
-								glog.Info("T-BC MOVE TO NORMAL")
-								pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-							} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
-								strings.Contains(output, "SLAVE to") {
-								glog.Info("T-BC MOVE TO HOLDOVER")
-								pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+						if pctFound && profileClockType == "T-BC" {
+							if strings.Contains(output, p.trIfaceName) {
+								if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
+									glog.Info("T-BC MOVE TO NORMAL")
+									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+									p.sendPtp4lEvent(true, p.trIfaceName)
+								} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
+									strings.Contains(output, "SLAVE to") {
+									glog.Info("T-BC MOVE TO HOLDOVER")
+									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+									p.sendPtp4lEvent(false, p.trIfaceName)
+								}
 							}
 						}
 					} else if p.name == phc2sysProcessName && len(p.haProfile) > 0 {
@@ -1047,6 +1053,9 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 		}
 		p.updateGMStatusOnProcessDown(p.name)
 
+		if pctFound && profileClockType == "T-BC" && p.name == ptp4lProcessName {
+			pm.AfterRunPTPCommand(&p.nodeProfile, "reset-to-default")
+		}
 		time.Sleep(connectionRetryInterval) // Delay to prevent flooding restarts if startup fails
 		// Don't restart after termination
 		if p.Stopped() {
@@ -1355,8 +1364,16 @@ func (p *ptpProcess) updateGMStatusOnProcessDown(process string) {
 	// need to update GM status for  following process kill for  ts2phc
 	if process == ts2phcProcessName {
 		// ts2phc process dead should update GM-STATUS
-		iface := p.ifaces.GetGMInterface().Name
-		p.ProcessTs2PhcEvents(faultyOffset, ts2phcProcessName, iface, event.PTP_FREERUN, map[event.ValueType]interface{}{event.PROCESS_STATUS: int64(0)})
+		// Reset the entire event subsystem
+		// (this nullifies the remaining pieces in the event data if ts2phc was killed during ptp profile change)
+		select {
+		case p.eventCh <- event.EventChannel{
+			ProcessName: event.TS2PHC,
+			CfgName:     p.configName,
+			Reset:       true,
+		}:
+		default:
+		}
 	}
 }
 
@@ -1503,4 +1520,27 @@ func containsAny(output string, indicators ...string) bool {
 		}
 	}
 	return false
+}
+
+func (p *ptpProcess) sendPtp4lEvent(slave bool, iface string) {
+	var ptpState event.PTPState
+	var reset bool
+	if slave {
+		ptpState = event.PTP_LOCKED
+
+	} else {
+		ptpState = event.PTP_FREERUN
+	}
+	select {
+	case p.eventCh <- event.EventChannel{
+		ProcessName: event.PTP4l,
+		State:       ptpState,
+		CfgName:     p.configName,
+		IFace:       iface,
+		ClockType:   p.clockType,
+		Time:        time.Now().UnixMilli(),
+		Reset:       reset,
+	}:
+	default:
+	}
 }
