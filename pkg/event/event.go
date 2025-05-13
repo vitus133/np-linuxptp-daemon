@@ -582,8 +582,11 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		leadingIFace:  gSycState.leadingIFace,
 	}
 
-	e.clkSyncState[cfgName].clockOffset = e.getLargestOffset(cfgName)
-
+	if gSycState.state == PTP_FREERUN {
+		e.clkSyncState[cfgName].clockOffset = FaultyPhaseOffset
+	} else {
+		e.clkSyncState[cfgName].clockOffset = e.getLargestOffset(cfgName)
+	}
 	// this will reduce log noise and prints 1 per sec
 	logTime := time.Now().Unix()
 	if e.clkSyncState[cfgName].lastLoggedTime != logTime {
