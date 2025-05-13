@@ -805,7 +805,7 @@ func (d *DpllConfig) MonitorDpllSysfs() {
 		case <-d.exitCh:
 			glog.Infof("Terminating sysfs DPLL monitoring")
 			d.sendDpllTerminationEvent()
-
+			time.Sleep(time.Second)
 			if d.onHoldover {
 				close(d.holdoverCloseCh) // Cancel any holdover
 			}
