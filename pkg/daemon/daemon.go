@@ -227,6 +227,10 @@ type Daemon struct {
 
 	// Allow vendors to include plugins
 	pluginManager PluginManager
+
+	// Allow relations between the profiles
+	// Main profile name is the key, dependent profile name - the value
+	relatedProfiles map[string]string
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance
@@ -266,10 +270,10 @@ func New(
 		hwconfigs:            hwconfigs,
 		refreshNodePtpDevice: refreshNodePtpDevice,
 		pmcPollInterval:      pmcPollInterval,
-		//TODO:Enable only for GM
-		processManager: pm,
-		readyTracker:   tracker,
-		stopCh:         stopCh,
+		processManager:       pm,
+		readyTracker:         tracker,
+		stopCh:               stopCh,
+		relatedProfiles:      make(map[string]string),
 	}
 }
 
@@ -545,6 +549,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		clockType = ptp4lOutput.clock_type
 	}
 
+	relatedSubProfile, found := (*nodeProfile).PtpSettings["relatedSubProfile"]
+	if found {
+		dn.relatedProfiles[*(*nodeProfile).Name] = relatedSubProfile
+		glog.Infof(" profile %s depends on current profile %s", relatedSubProfile, *(*nodeProfile).Name)
+	}
 	for _, p := range ptpProcesses {
 		pProcess = p
 		switch pProcess {

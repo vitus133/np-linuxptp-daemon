@@ -3,6 +3,7 @@ package daemon
 // This tests daemon private functions
 
 import (
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -110,15 +111,54 @@ func Test_applyProfile_synce(t *testing.T) {
 func Test_applyProfile_TBC(t *testing.T) {
 	defer clean(t)
 	testDataFiles := []string{
-		"testdata/profile-tbc.yaml",
+		"testdata/profile-tbc-tr.yaml",
+		"testdata/profile-tbc-tt.yaml",
 	}
+	stopCh := make(<-chan struct{})
+	assert.NoError(t, leap.MockLeapFile())
+	defer func() {
+		close(leap.LeapMgr.Close)
+		// Sleep to allow context to switch
+		time.Sleep(100 * time.Millisecond)
+		assert.Nil(t, leap.LeapMgr)
+	}()
+	dn := New(
+		"test-node-name",
+		"openshift-ptp",
+		false,
+		nil,
+		&LinuxPTPConfUpdate{
+			UpdateCh:     make(chan bool),
+			NodeProfiles: []ptpv1.PtpProfile{},
+		},
+		stopCh,
+		[]string{"e810"},
+		&[]ptpv1.HwConfig{},
+		nil,
+		make(chan bool),
+		30,
+		&ReadyTracker{},
+	)
+	assert.NotNil(t, dn)
 
 	for i := range len(testDataFiles) {
 		mkPath(t)
 		profile, err := loadProfile(testDataFiles[i])
 		assert.NoError(t, err)
 		// Will assert inside in case of error:
-		applyTestProfile(t, profile)
+		err = dn.applyNodePtpProfile(0, profile)
+		assert.NoError(t, err)
+
+		switch i {
+		// cases for breakpoints
+		case 0:
+			log.Println(testDataFiles[0])
+		case 1:
+			log.Println(testDataFiles[1])
+		case 2:
+			log.Println(testDataFiles[2])
+
+		}
 		clean(t)
 	}
 }
