@@ -1,9 +1,10 @@
-name: 01-tbc-tt
+name: 00-tbc-tt
 ptpSettings:
   unitTest: /tmp/test
   clockId[ens4f0]: 5799633565432596414
   clockId[ens5f0]: 5799633565433967128
   clockId[ens8f0]: 5799633565432596448
+  controllingProfile: 01-tbc-tr
 ptp4lConf: |
   [ens4f0]
   masterOnly 1

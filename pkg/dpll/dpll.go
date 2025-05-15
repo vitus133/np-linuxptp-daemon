@@ -121,9 +121,11 @@ type DpllConfig struct {
 	// is driver-specific and vendor-specific.
 	clockId uint64
 	sync.Mutex
-	isMonitoring         bool
-	subscriber           []*DpllSubscriber
-	phaseOffsetPinFilter map[string]map[string]string
+	isMonitoring             bool
+	subscriber               []*DpllSubscriber
+	phaseOffsetPinFilter     map[string]map[string]string
+	inSyncConditionThreshold uint64
+	inSyncConditionTimes     uint64
 }
 
 func (d *DpllConfig) InSpec() bool {
@@ -301,7 +303,8 @@ func (d *DpllConfig) unRegisterAll() {
 
 // NewDpll ... create new DPLL process
 func NewDpll(clockId uint64, localMaxHoldoverOffSet, localHoldoverTimeout, maxInSpecOffset uint64,
-	iface string, dependsOn []event.EventSource, apiType dpllApiType, phaseOffsetPinFilter map[string]map[string]string) *DpllConfig {
+	iface string, dependsOn []event.EventSource, apiType dpllApiType, phaseOffsetPinFilter map[string]map[string]string,
+	inSyncConditionTh uint64, inSyncConditionTimes uint64) *DpllConfig {
 	glog.Infof("Calling NewDpll with clockId %x, localMaxHoldoverOffSet=%d, localHoldoverTimeout=%d, maxInSpecOffset=%d, iface=%s, phase offset pin filter=%v", clockId, localMaxHoldoverOffSet, localHoldoverTimeout, maxInSpecOffset, iface, phaseOffsetPinFilter)
 	d := &DpllConfig{
 		clockId:                clockId,
@@ -311,19 +314,21 @@ func NewDpll(clockId uint64, localMaxHoldoverOffSet, localHoldoverTimeout, maxIn
 		slope: func() float64 {
 			return float64(localMaxHoldoverOffSet) / float64(localHoldoverTimeout)
 		}(),
-		timer:                0,
-		state:                event.PTP_FREERUN,
-		iface:                iface,
-		onHoldover:           false,
-		sourceLost:           false,
-		frequencyTraceable:   false,
-		dependsOn:            dependsOn,
-		exitCh:               make(chan struct{}),
-		ticker:               time.NewTicker(monitoringInterval),
-		isMonitoring:         false,
-		apiType:              apiType,
-		phaseOffsetPinFilter: phaseOffsetPinFilter,
-		phaseOffset:          FaultyPhaseOffset,
+		timer:                    0,
+		state:                    event.PTP_FREERUN,
+		iface:                    iface,
+		onHoldover:               false,
+		sourceLost:               false,
+		frequencyTraceable:       false,
+		dependsOn:                dependsOn,
+		exitCh:                   make(chan struct{}),
+		ticker:                   time.NewTicker(monitoringInterval),
+		isMonitoring:             false,
+		apiType:                  apiType,
+		phaseOffsetPinFilter:     phaseOffsetPinFilter,
+		phaseOffset:              FaultyPhaseOffset,
+		inSyncConditionThreshold: inSyncConditionTh,
+		inSyncConditionTimes:     inSyncConditionTimes,
 	}
 
 	// time to reach maxnInSpecOffset
@@ -768,6 +773,8 @@ func (d *DpllConfig) sendDpllEvent() {
 			event.LEADING_SOURCE: func() bool {
 				return d.hasLeadingSource()
 			}(),
+			event.IN_SYNC_CONDITION_THRESHOLD: d.inSyncConditionThreshold,
+			event.IN_SYNC_CONDITION_TIMES:     d.inSyncConditionTimes,
 		},
 		ClockType:          d.processConfig.ClockType,
 		Time:               time.Now().UnixMilli(),

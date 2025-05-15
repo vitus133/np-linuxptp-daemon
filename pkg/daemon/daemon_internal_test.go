@@ -111,8 +111,8 @@ func Test_applyProfile_synce(t *testing.T) {
 func Test_applyProfile_TBC(t *testing.T) {
 	defer clean(t)
 	testDataFiles := []string{
-		"testdata/profile-tbc-tr.yaml",
 		"testdata/profile-tbc-tt.yaml",
+		"testdata/profile-tbc-tr.yaml",
 	}
 	stopCh := make(<-chan struct{})
 	assert.NoError(t, leap.MockLeapFile())

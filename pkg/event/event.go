@@ -32,20 +32,24 @@ const (
 	STATE      ValueType = "state"
 	GPS_STATUS ValueType = "gnss_status"
 	//Status           ValueType = "status"
-	PHASE_STATUS              ValueType = "phase_status"
-	FREQUENCY_STATUS          ValueType = "frequency_status"
-	NMEA_STATUS               ValueType = "nmea_status"
-	PROCESS_STATUS            ValueType = "process_status"
-	PPS_STATUS                ValueType = "pps_status"
-	LEADING_INTERFACE_UNKNOWN string    = "unknown"
-	DEVICE                    ValueType = "device"
-	QL                        ValueType = "ql"
-	EXT_QL                    ValueType = "ext_ql"
-	CLOCK_QUALITY             ValueType = "clock_quality"
-	NETWORK_OPTION            ValueType = "network_option"
-	EEC_STATE                           = "eec_state"
-	LEADING_SOURCE            ValueType = "leading_source"
-	FaultyPhaseOffset                   = 99999999999
+	PHASE_STATUS                ValueType = "phase_status"
+	FREQUENCY_STATUS            ValueType = "frequency_status"
+	NMEA_STATUS                 ValueType = "nmea_status"
+	PROCESS_STATUS              ValueType = "process_status"
+	PPS_STATUS                  ValueType = "pps_status"
+	LEADING_INTERFACE_UNKNOWN   string    = "unknown"
+	DEVICE                      ValueType = "device"
+	QL                          ValueType = "ql"
+	EXT_QL                      ValueType = "ext_ql"
+	CLOCK_QUALITY               ValueType = "clock_quality"
+	NETWORK_OPTION              ValueType = "network_option"
+	EEC_STATE                             = "eec_state"
+	LEADING_SOURCE              ValueType = "leading_source"
+	IN_SYNC_CONDITION_THRESHOLD ValueType = "in-sync-th"
+	IN_SYNC_CONDITION_TIMES     ValueType = "in-sync-times"
+	CONTROLLED_PORTS_CONFIG     ValueType = "controlled-ports-config"
+	PARENT_CLOCK_CLASS          ValueType = "parent_clock_class"
+	FaultyPhaseOffset                     = 99999999999
 )
 
 var valueTypeHelpTxt = map[ValueType]string{
@@ -889,6 +893,7 @@ connect:
 				}
 				continue
 			}
+			glog.Infof("%++v", event)
 			var logOut []string
 			logDataValues := ""
 			if event.ProcessName == SYNCE {
@@ -899,9 +904,7 @@ connect:
 				}
 				e.UpdateClockStateMetrics(event.State, string(event.ProcessName), event.IFace)
 			} else {
-				if event.ClockType == BC {
-					event = e.consolidateConfigNames(event)
-				}
+
 				// Update the in MemData
 				dataDetails := e.addEvent(event)
 				var clockState clockSyncState
@@ -964,55 +967,56 @@ connect:
 						e.UpdateClockStateMetrics(clockState.state, string(event.ClockType), leadingIFace)
 					}
 				}
+				if event.ClockType == GM {
+					// Default Assignment: The clockAccuracy of clockState is initially set to the clockAccuracy of the event
+					//This serves as a default value.
+					clockState.clockAccuracy = e.clockAccuracy
 
-				// Default Assignment: The clockAccuracy of clockState is initially set to the clockAccuracy of the event
-				//This serves as a default value.
-				clockState.clockAccuracy = e.clockAccuracy
-
-				// Conditional Update: Check if the clockClass of clockState is either fbprotocol.ClockClass7 or protocol.ClockClassOutOfSpec
-				// and if the ProcessName of the event is DPLL.
-				if (clockState.clockClass == fbprotocol.ClockClass7 || clockState.clockClass == protocol.ClockClassOutOfSpec) &&
-					event.ProcessName == DPLL {
-					// Offset-Based Accuracy Calculation: Attempt to retrieve an OFFSET value from the event's Values map.
-					if offset, found := event.Values[OFFSET]; found {
-						// If the OFFSET is found and can be cast to an int64, calculate a new clockAccuracy.
-						offsetValue, ok := offset.(int64)
-						if ok {
-							// Use fbprotocol.ClockAccuracyFromOffset function to calculate the new clockAccuracy.
-							// This function takes a time.Duration created by multiplying the offsetValue by time.Nanosecond.
-							clockAccuracy := fbprotocol.ClockAccuracyFromOffset(time.Duration(offsetValue) * time.Nanosecond)
-							// Assign the calculated clockAccuracy to clockState.clockAccuracy.
-							clockState.clockAccuracy = clockAccuracy
+					// Conditional Update: Check if the clockClass of clockState is either fbprotocol.ClockClass7 or protocol.ClockClassOutOfSpec
+					// and if the ProcessName of the event is DPLL.
+					if (clockState.clockClass == fbprotocol.ClockClass7 || clockState.clockClass == protocol.ClockClassOutOfSpec) &&
+						event.ProcessName == DPLL {
+						// Offset-Based Accuracy Calculation: Attempt to retrieve an OFFSET value from the event's Values map.
+						if offset, found := event.Values[OFFSET]; found {
+							// If the OFFSET is found and can be cast to an int64, calculate a new clockAccuracy.
+							offsetValue, ok := offset.(int64)
+							if ok {
+								// Use fbprotocol.ClockAccuracyFromOffset function to calculate the new clockAccuracy.
+								// This function takes a time.Duration created by multiplying the offsetValue by time.Nanosecond.
+								clockAccuracy := fbprotocol.ClockAccuracyFromOffset(time.Duration(offsetValue) * time.Nanosecond)
+								// Assign the calculated clockAccuracy to clockState.clockAccuracy.
+								clockState.clockAccuracy = clockAccuracy
+							}
 						}
 					}
-				}
 
-				// If the clockClass of clockState is not protocol.ClockClassUninitialized and there is a change in clockClass or clockAccuracy,
-				// log the change and update the clock class.
-				if clockState.clockClass != protocol.ClockClassUninitialized &&
-					(uint8(clockState.clockClass) != uint8(e.clockClass) || clockState.clockAccuracy != e.clockAccuracy) {
-					glog.Infof("clock class change request from %d to %d with clock accuracy from %d to %d",
-						uint8(e.clockClass), uint8(clockState.clockClass), uint8(e.clockAccuracy), uint8(clockState.clockAccuracy))
-					debug.UpdateClockClass(uint8(clockState.clockClass))
-					go func() {
-						select {
-						case clockClassRequestCh <- ClockClassRequest{
-							cfgName:       event.CfgName,
-							clockState:    clockState.state,
-							clockType:     event.ClockType,
-							clockClass:    clockState.clockClass,
-							clockAccuracy: clockState.clockAccuracy,
-						}:
-						default:
-							glog.Error("clock class request busy updating previous request, will try next event")
-						}
-					}()
-				}
-				if lastClockState != clockState.state {
-					glog.Infof("PTP State: %v, Clock Class %d Time %s sourceLost %v", clockState.state, clockState.clockClass, time.Now(), clockState.sourceLost)
-					lastClockState = clockState.state
-				}
-			}
+					// If the clockClass of clockState is not protocol.ClockClassUninitialized and there is a change in clockClass or clockAccuracy,
+					// log the change and update the clock class.
+					if clockState.clockClass != protocol.ClockClassUninitialized &&
+						(uint8(clockState.clockClass) != uint8(e.clockClass) || clockState.clockAccuracy != e.clockAccuracy) {
+						glog.Infof("clock class change request from %d to %d with clock accuracy from %d to %d",
+							uint8(e.clockClass), uint8(clockState.clockClass), uint8(e.clockAccuracy), uint8(clockState.clockAccuracy))
+						debug.UpdateClockClass(uint8(clockState.clockClass))
+						go func() {
+							select {
+							case clockClassRequestCh <- ClockClassRequest{
+								cfgName:       event.CfgName,
+								clockState:    clockState.state,
+								clockType:     event.ClockType,
+								clockClass:    clockState.clockClass,
+								clockAccuracy: clockState.clockAccuracy,
+							}:
+							default:
+								glog.Error("clock class request busy updating previous request, will try next event")
+							}
+						}()
+					}
+					if lastClockState != clockState.state {
+						glog.Infof("PTP State: %v, Clock Class %d Time %s sourceLost %v", clockState.state, clockState.clockClass, time.Now(), clockState.sourceLost)
+						lastClockState = clockState.state
+					}
+				} // T-GM
+			} // Not SYNC-E
 
 			if len(logOut) > 0 {
 				if e.stdoutToSocket {
@@ -1278,6 +1282,9 @@ func (e *EventHandler) GetData(cfgName string, processName EventSource) *Data {
 }
 
 func (e *EventHandler) addEvent(event EventChannel) *DataDetails {
+	if event.ClockType == BC {
+		event = e.consolidateConfigNames(event)
+	}
 	d := e.GetData(event.CfgName, event.ProcessName)
 	d.AddEvent(event)
 

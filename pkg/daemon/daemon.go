@@ -160,29 +160,30 @@ func (p *ProcessManager) UpdateSynceConfig(config *synce.Relations) {
 }
 
 type ptpProcess struct {
-	name                string
-	ifaces              config.IFaces
-	processSocketPath   string
-	processConfigPath   string
-	configName          string
-	messageTag          string
-	eventCh             chan event.EventChannel
-	exitCh              chan bool
-	execMutex           sync.Mutex
-	stopped             bool
-	logFilterRegex      string
-	cmd                 *exec.Cmd
-	depProcess          []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
-	nodeProfile         ptpv1.PtpProfile
-	parentClockClass    float64
-	pmcCheck            bool
-	clockType           event.ClockType
-	ptpClockThreshold   *ptpv1.PtpClockThreshold
-	haProfile           map[string][]string // stores list of interface name for each profile
-	syncERelations      *synce.Relations
-	c                   *net.Conn
-	hasCollectedMetrics bool
-	trIfaceName         string // Time receiver interface name for T-BC clock monitoring
+	name                      string
+	ifaces                    config.IFaces
+	processSocketPath         string
+	processConfigPath         string
+	configName                string
+	messageTag                string
+	eventCh                   chan event.EventChannel
+	exitCh                    chan bool
+	execMutex                 sync.Mutex
+	stopped                   bool
+	logFilterRegex            string
+	cmd                       *exec.Cmd
+	depProcess                []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
+	nodeProfile               ptpv1.PtpProfile
+	parentClockClass          float64
+	pmcCheck                  bool
+	clockType                 event.ClockType
+	ptpClockThreshold         *ptpv1.PtpClockThreshold
+	haProfile                 map[string][]string // stores list of interface name for each profile
+	syncERelations            *synce.Relations
+	c                         *net.Conn
+	hasCollectedMetrics       bool
+	trIfaceName               string // Time receiver interface name for T-BC clock monitoring
+	controlledPortsConfigFile string
 }
 
 func (p *ptpProcess) Stopped() bool {
@@ -230,7 +231,8 @@ type Daemon struct {
 
 	// Allow relations between the profiles
 	// Main profile name is the key, dependent profile name - the value
-	relatedProfiles map[string]string
+	relatedProfiles           map[string]string
+	controlledPortsConfigFile string
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance
@@ -554,6 +556,8 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		dn.relatedProfiles[*(*nodeProfile).Name] = relatedSubProfile
 		glog.Infof(" profile %s depends on current profile %s", relatedSubProfile, *(*nodeProfile).Name)
 	}
+	controllingProfile, _ := (*nodeProfile).PtpSettings["controllingProfile"]
+
 	for _, p := range ptpProcesses {
 		pProcess = p
 		switch pProcess {
@@ -568,6 +572,10 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			configFile = fmt.Sprintf("ptp4l.%d.config", runID)
 			configPath = fmt.Sprintf("%s/%s", configPrefix, configFile)
 			messageTag = fmt.Sprintf("[ptp4l.%d.config:{level}]", runID)
+			if controllingProfile != "" {
+				dn.controlledPortsConfigFile = configFile
+			}
+
 		case phc2sysProcessName:
 			configInput = nodeProfile.Phc2sysConf
 			configOpts = nodeProfile.Phc2sysOpts
@@ -689,22 +697,23 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		args := strings.Split(cmdLine, " ")
 		cmd = exec.Command(args[0], args[1:]...)
 		dprocess := ptpProcess{
-			name:              p,
-			ifaces:            ifaces,
-			processConfigPath: configPath,
-			processSocketPath: socketPath,
-			configName:        configFile,
-			messageTag:        messageTag,
-			exitCh:            make(chan bool),
-			stopped:           false,
-			logFilterRegex:    getLogFilterRegex(nodeProfile),
-			cmd:               cmd,
-			depProcess:        []process{},
-			nodeProfile:       *nodeProfile,
-			clockType:         clockType,
-			ptpClockThreshold: getPTPThreshold(nodeProfile),
-			haProfile:         haProfile,
-			syncERelations:    relations,
+			name:                      p,
+			ifaces:                    ifaces,
+			processConfigPath:         configPath,
+			processSocketPath:         socketPath,
+			configName:                configFile,
+			messageTag:                messageTag,
+			exitCh:                    make(chan bool),
+			stopped:                   false,
+			logFilterRegex:            getLogFilterRegex(nodeProfile),
+			cmd:                       cmd,
+			depProcess:                []process{},
+			nodeProfile:               *nodeProfile,
+			clockType:                 clockType,
+			ptpClockThreshold:         getPTPThreshold(nodeProfile),
+			haProfile:                 haProfile,
+			syncERelations:            relations,
+			controlledPortsConfigFile: dn.controlledPortsConfigFile,
 		}
 
 		if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
@@ -762,6 +771,22 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			var localMaxHoldoverOffSet uint64 = dpll.LocalMaxHoldoverOffSet
 			var localHoldoverTimeout uint64 = dpll.LocalHoldoverTimeout
 			var maxInSpecOffset uint64 = dpll.MaxInSpecOffset
+			var inSyncConditionTh uint64 = dpll.MaxInSpecOffset
+			var inSyncConditionTimes uint64 = 1
+			sInSyncConditionTh, found := (*nodeProfile).PtpSettings["inSyncConditionThreshold"]
+			if found {
+				inSyncConditionTh, err = strconv.ParseUint(sInSyncConditionTh, 0, 64)
+				if err != nil {
+					return fmt.Errorf("failed to parse inSyncConditionThreshold: %s", err)
+				}
+			}
+			sInSyncConditionTim, found := (*nodeProfile).PtpSettings["inSyncConditionTimes"]
+			if found {
+				inSyncConditionTimes, err = strconv.ParseUint(sInSyncConditionTim, 0, 64)
+				if err != nil {
+					return fmt.Errorf("failed to parse inSyncConditionTimes: %s", err)
+				}
+			}
 			var clockId uint64
 			phaseOffsetPinFilter := map[string]string{}
 			for _, iface := range dprocess.ifaces {
@@ -801,13 +826,14 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 					// depends on will be either PPS or  GNSS,
 					// ONLY the one with GNSS dependency will go to HOLDOVER
 					dpllDaemon := dpll.NewDpll(clockId, localMaxHoldoverOffSet, localHoldoverTimeout,
-						maxInSpecOffset, iface.Name, eventSource, dpll.NONE, dn.GetPhaseOffsetPinFilter(nodeProfile))
+						maxInSpecOffset, iface.Name, eventSource, dpll.NONE, dn.GetPhaseOffsetPinFilter(nodeProfile),
+						// Used only in T-BC in-sync condition:
+						inSyncConditionTh, inSyncConditionTimes)
 					glog.Infof("depending on %s", dpllDaemon.DependsOn())
 					dpllDaemon.CmdInit()
 					dprocess.depProcess = append(dprocess.depProcess, dpllDaemon)
 				}
 			}
-
 		}
 		err = os.WriteFile(configPath, []byte(configOutput), 0644)
 		if err != nil {
@@ -916,6 +942,7 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 						glog.Errorf("failed to write class change event %s", err.Error())
 					}
 				}
+
 			} else {
 				glog.Errorf("parse error in clock class value %s", parseError)
 			}
@@ -970,18 +997,21 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 					if p.name == ptp4lProcessName {
 						if strings.Contains(output, ClockClassChangeIndicator) {
 							go p.updateClockClass(nil)
+						} else if p.pmcCheck {
+							p.pmcCheck = false
+							go p.updateClockClass(nil)
 						}
 						if pctFound && profileClockType == "T-BC" {
 							if strings.Contains(output, p.trIfaceName) {
 								if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
 									glog.Info("T-BC MOVE TO NORMAL")
 									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-									p.sendPtp4lEvent(true, p.trIfaceName)
+									p.sendPtp4lEvent(event.PTP_LOCKED)
 								} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
 									strings.Contains(output, "SLAVE to") {
 									glog.Info("T-BC MOVE TO HOLDOVER")
 									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-									p.sendPtp4lEvent(false, p.trIfaceName)
+									p.sendPtp4lEvent(event.PTP_FREERUN)
 								}
 							}
 						}
@@ -1531,24 +1561,20 @@ func containsAny(output string, indicators ...string) bool {
 	return false
 }
 
-func (p *ptpProcess) sendPtp4lEvent(slave bool, iface string) {
-	var ptpState event.PTPState
-	var reset bool
-	if slave {
-		ptpState = event.PTP_LOCKED
-
-	} else {
-		ptpState = event.PTP_FREERUN
-	}
+func (p *ptpProcess) sendPtp4lEvent(state event.PTPState) {
 	select {
 	case p.eventCh <- event.EventChannel{
 		ProcessName: event.PTP4l,
-		State:       ptpState,
+		State:       state,
 		CfgName:     p.configName,
-		IFace:       iface,
+		IFace:       p.trIfaceName,
 		ClockType:   p.clockType,
 		Time:        time.Now().UnixMilli(),
-		Reset:       reset,
+		Reset:       false,
+		Values: map[event.ValueType]interface{}{
+			event.CONTROLLED_PORTS_CONFIG: p.controlledPortsConfigFile,
+			event.PARENT_CLOCK_CLASS:      p.parentClockClass,
+		},
 	}:
 	default:
 	}
