@@ -17,7 +17,7 @@ const (
 	DefaultUpdateInterval  = 30
 	DefaultProfilePath     = "/etc/linuxptp"
 	DefaultLeapConfigPath  = "/etc/leap"
-	DefaultPmcPollInterval = 60
+	DefaultPmcPollInterval = 5
 )
 
 type IFaces []Iface

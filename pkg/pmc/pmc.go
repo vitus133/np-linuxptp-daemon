@@ -289,7 +289,7 @@ func RunPMCExpGetTimePropertiesDS(configFileName string) (tp protocol.TimeProper
 
 	for range numRetry {
 		if err = e.Send(cmdStr + "\n"); err == nil {
-			result, matches, err := e.Expect(regexp.MustCompile(tp.RegEx()), cmdTimeout)
+			_, matches, err := e.Expect(regexp.MustCompile(tp.RegEx()), cmdTimeout)
 			if err != nil {
 				if _, ok := err.(expect.TimeoutError); ok {
 					continue
@@ -297,10 +297,10 @@ func RunPMCExpGetTimePropertiesDS(configFileName string) (tp protocol.TimeProper
 				glog.Errorf("pmc result match error %v", err)
 				return tp, err
 			}
-			glog.Infof("pmc result: %s", result)
 			for i, m := range matches[1:] {
 				tp.Update(tp.Keys()[i], m)
 			}
+			glog.Infof("pmc result: %++v", tp)
 			break
 		}
 	}

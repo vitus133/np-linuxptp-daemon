@@ -47,9 +47,10 @@ const (
 	LEADING_SOURCE              ValueType = "leading_source"
 	IN_SYNC_CONDITION_THRESHOLD ValueType = "in-sync-th"
 	IN_SYNC_CONDITION_TIMES     ValueType = "in-sync-times"
+	TO_FREERUN_THRESHOLD        ValueType = "free-run_th"
 	CONTROLLED_PORTS_CONFIG     ValueType = "controlled-ports-config"
-	PARENT_CLOCK_CLASS          ValueType = "parent_clock_class"
-	TIME_PROPERTIES_DATA_SET    ValueType = "timeProps"
+	PARENT_DATA_SET             ValueType = "parent-ds"
+	TIME_PROPERTIES_DATA_SET    ValueType = "time-props"
 	FaultyPhaseOffset                     = 99999999999
 )
 
@@ -180,6 +181,7 @@ type EventHandler struct {
 	outOfSpec          bool // is offset out of spec, used for Lost Source,In Spec and OPut of Spec state transitions
 	frequencyTraceable bool // will be tru if synce is traceable
 	ReduceLog          bool // reduce logs for every announce
+	LeadingClockData   *LeadingClockParams
 }
 
 // EventChannel .. event channel to subscriber to events
@@ -202,6 +204,22 @@ var (
 	mockTest        bool = false
 	StateRegisterer *StateNotifier
 )
+
+// LeadingClockParams ... leading clock parameters includes state
+// and configuration of the system leading clock. There is only
+// one leading clock in the system. The leading clock is the clock that
+// receives phase, frequency and ToD synchronization from the PRTC / T-GM / T/BC.
+// Currently used for T-BC only
+type LeadingClockParams struct {
+	upstreamTimeProperties   *protocol.TimePropertiesDS
+	upstreamParentDataSet    *protocol.ParentDataSet
+	leadingInterface         string
+	leadingInterfaceConfig   string
+	controlledPortsConfig    string
+	inSyncConditionThreshold int
+	inSyncConditionTimes     int
+	toFreeRunThreshold       int
+}
 
 // MockEnable ...
 func (e *EventHandler) MockEnable() {
@@ -226,6 +244,7 @@ func Init(nodeName string, stdOutToSocket bool, socketName string, processChanne
 		outOfSpec:          false,
 		frequencyTraceable: false,
 		ReduceLog:          true,
+		LeadingClockData:   &LeadingClockParams{},
 	}
 	if clockClassMetric != nil {
 		clockClassMetric.With(prometheus.Labels{
@@ -487,7 +506,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	ts2phcState := PTP_FREERUN
 
 	syncSrcLost := e.isSourceLost(cfgName)
-	leadingInterface := e.getLeadingInterface(cfgName)
+	leadingInterface := e.getLeadingInterfaceBC()
 	if leadingInterface == LEADING_INTERFACE_UNKNOWN {
 		glog.Infof("Leading interface is not yet identified, clock state reporting delayed.")
 		return clockSyncState{leadingIFace: leadingInterface}
@@ -598,6 +617,8 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	}
 	if event.ProcessName == PTP4l {
 		// TODO: Dataset Interworking function here
+		tp := event.Values[TIME_PROPERTIES_DATA_SET].(*protocol.TimePropertiesDS)
+		glog.Infof("leading iface event %++v", tp)
 
 	}
 	return rclockSyncState
@@ -633,9 +654,12 @@ func (e *EventHandler) isSourceLost(cfgName string) bool {
 }
 
 func (e *EventHandler) inSyncCondition(cfgName string) bool {
-	const inSyncThreshold = 8
+	if e.LeadingClockData.inSyncConditionThreshold == 0 {
+		glog.Info("Leading clock in-sync condition is pending initialization")
+		return false
+	}
 	worstDpllOffset := e.getLargestOffset(cfgName)
-	return math.Abs(float64(worstDpllOffset)) < inSyncThreshold
+	return math.Abs(float64(worstDpllOffset)) < float64(e.LeadingClockData.inSyncConditionThreshold)
 }
 
 func (e *EventHandler) isSourceLostBC(cfgName string) bool {
@@ -690,13 +714,17 @@ func (e *EventHandler) getLargestOffset(cfgName string) int64 {
 }
 
 func (e *EventHandler) freeRunCondition(cfgName string) bool {
-	const inFreeRunThreshold = 20
+	if e.LeadingClockData.toFreeRunThreshold == 0 {
+		glog.Info("Leading clock free-run condition is pending initialization")
+		return true
+	}
 	if data, ok := e.data[cfgName]; ok {
 		for _, d := range data {
 			if d.ProcessName == DPLL {
 				for _, dd := range d.Details {
 					if dd.IFace == e.clkSyncState[cfgName].leadingIFace {
-						if math.Abs(float64(dd.Offset)) > inFreeRunThreshold {
+						if math.Abs(float64(dd.Offset)) > float64(e.LeadingClockData.toFreeRunThreshold) {
+							glog.Infof("free-run condition on DPLL ", dd.IFace)
 							return true
 						}
 					}
@@ -707,6 +735,13 @@ func (e *EventHandler) freeRunCondition(cfgName string) bool {
 	return false
 }
 
+func (e *EventHandler) getLeadingInterfaceBC() string {
+	if e.LeadingClockData.leadingInterface != "" {
+		return e.LeadingClockData.leadingInterface
+	}
+	return LEADING_INTERFACE_UNKNOWN
+}
+
 func (e *EventHandler) getLeadingInterface(cfgName string) string {
 	if data, ok := e.data[cfgName]; ok {
 		for _, d := range data {
@@ -715,12 +750,6 @@ func (e *EventHandler) getLeadingInterface(cfgName string) string {
 			} else if d.ProcessName == TS2PHCProcessName && len(d.Details) > 0 {
 				for _, dd := range d.Details {
 					if dd.signalSource == GNSS {
-						return dd.IFace
-					}
-				}
-			} else if d.ProcessName == DPLL && len(d.Details) > 0 {
-				for _, dd := range d.Details {
-					if dd.signalSource == PTP4l {
 						return dd.IFace
 					}
 				}
@@ -869,6 +898,7 @@ connect:
 			// replace ts2phc logs here
 			if event.Reset { // clean up
 				debug.ClearState() // clear any state data used for debug
+				e.LeadingClockData = &LeadingClockParams{}
 				if event.ProcessName == TS2PHC {
 					e.unregisterMetrics(event.CfgName, "")
 					delete(e.data, event.CfgName) // this will delete all index
@@ -1280,7 +1310,7 @@ func (e *EventHandler) GetData(cfgName string, processName EventSource) *Data {
 
 func (e *EventHandler) addEvent(event EventChannel) *DataDetails {
 	if event.ClockType == BC {
-		event = e.consolidateConfigNames(event)
+		event = e.convergeConfig(event)
 	}
 	d := e.GetData(event.CfgName, event.ProcessName)
 	d.AddEvent(event)
@@ -1327,7 +1357,7 @@ func getMetricName(valueType ValueType) string {
 	return string(valueType)
 }
 
-func (e *EventHandler) consolidateConfigNames(event EventChannel) EventChannel {
+func (e *EventHandler) convergeConfig(event EventChannel) EventChannel {
 	if event.ProcessName == PTP4lProcessName {
 		iface := event.IFace
 		for cfg, dd := range e.data {
@@ -1340,12 +1370,51 @@ func (e *EventHandler) consolidateConfigNames(event EventChannel) EventChannel {
 						// We want to process ptp4l having a separate config with ts2phc and dpll events having ts2phc config
 						// so in the rare occurrence of ptp4l state change we modify the event.CfgName
 						event.CfgName = cfg
-						glog.Infof("ptp4l event %++v", event)
-						return event
 					}
 				}
 			}
 		}
 	}
+	e.updateLeadingClockData(event)
 	return event
+}
+
+func (e *EventHandler) updateLeadingClockData(event EventChannel) {
+	switch event.ProcessName {
+	case PTP4lProcessName:
+
+		tp, found := event.Values[TIME_PROPERTIES_DATA_SET].(*protocol.TimePropertiesDS)
+		if found {
+			e.LeadingClockData.upstreamTimeProperties = tp
+			glog.Infof("%++v", tp)
+		}
+		cpc, found := event.Values[CONTROLLED_PORTS_CONFIG].(string)
+		if found {
+			e.LeadingClockData.controlledPortsConfig = cpc
+			glog.Infof("%++v", cpc)
+		}
+		pds, found := event.Values[PARENT_DATA_SET].(*protocol.ParentDataSet)
+		if found {
+			e.LeadingClockData.upstreamParentDataSet = pds
+			glog.Infof("%++v", pds)
+		}
+	case DPLL:
+		ls, found := event.Values[LEADING_SOURCE].(bool)
+		if found && ls {
+			e.LeadingClockData.leadingInterface = event.IFace
+		}
+		inSyncTh, found := event.Values[IN_SYNC_CONDITION_THRESHOLD].(int)
+		if found {
+			e.LeadingClockData.inSyncConditionThreshold = int(inSyncTh)
+		}
+		inSyncTimes, found := event.Values[IN_SYNC_CONDITION_TIMES].(int)
+		if found {
+			// TODO: implement FIR and use it
+			e.LeadingClockData.inSyncConditionTimes = int(inSyncTimes)
+		}
+		toFreeRunTh, found := event.Values[TO_FREERUN_THRESHOLD].(uint64)
+		if found {
+			e.LeadingClockData.toFreeRunThreshold = int(toFreeRunTh)
+		}
+	}
 }

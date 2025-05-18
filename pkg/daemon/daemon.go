@@ -178,6 +178,7 @@ type ptpProcess struct {
 	ParentDataSet             *protocol.ParentDataSet
 	TimePropertiesDataSet     *protocol.TimePropertiesDS
 	pmcCheck                  bool
+	lastTransitionResult      event.PTPState
 	clockType                 event.ClockType
 	ptpClockThreshold         *ptpv1.PtpClockThreshold
 	haProfile                 map[string][]string // stores list of interface name for each profile
@@ -716,6 +717,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			haProfile:                 haProfile,
 			syncERelations:            relations,
 			controlledPortsConfigFile: dn.controlledPortsConfigFile,
+			lastTransitionResult:      event.PTP_NOTSET,
 		}
 
 		if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
@@ -889,7 +891,7 @@ func addScheduling(nodeProfile *ptpv1.PtpProfile, cmdLine string) string {
 			return cmdLine
 		}
 		cmdLine = fmt.Sprintf("/bin/chrt -f %d %s", priority, cmdLine)
-		glog.Infof(cmdLine)
+
 		return cmdLine
 	}
 	return cmdLine
@@ -947,7 +949,7 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	if err != nil {
 		glog.Errorf("failed to get time properties DataSet %s", err.Error())
 	}
-	p.sendPtp4lEvent(event.PTP_UNKNOWN)
+	p.sendPtp4lEvent()
 }
 
 func (p *ptpProcess) getTimePropertiesDS() error {
@@ -1011,12 +1013,14 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 								if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
 									glog.Info("T-BC MOVE TO NORMAL")
 									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-									p.sendPtp4lEvent(event.PTP_LOCKED)
+									p.lastTransitionResult = event.PTP_LOCKED
+									p.sendPtp4lEvent()
 								} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
 									strings.Contains(output, "SLAVE to") {
 									glog.Info("T-BC MOVE TO HOLDOVER")
 									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-									p.sendPtp4lEvent(event.PTP_FREERUN)
+									p.lastTransitionResult = event.PTP_FREERUN
+									p.sendPtp4lEvent()
 								}
 							}
 						}
@@ -1566,19 +1570,25 @@ func containsAny(output string, indicators ...string) bool {
 	return false
 }
 
-func (p *ptpProcess) sendPtp4lEvent(state event.PTPState) {
+func (p *ptpProcess) sendPtp4lEvent() {
 	select {
 	case p.eventCh <- event.EventChannel{
 		ProcessName: event.PTP4l,
-		State:       state,
+		State:       p.lastTransitionResult,
 		CfgName:     p.configName,
 		IFace:       p.trIfaceName,
 		ClockType:   p.clockType,
 		Time:        time.Now().UnixMilli(),
 		Reset:       false,
+		SourceLost: func() bool {
+			if p.lastTransitionResult == event.PTP_LOCKED {
+				return false
+			}
+			return true
+		}(),
 		Values: map[event.ValueType]interface{}{
 			event.CONTROLLED_PORTS_CONFIG:  p.controlledPortsConfigFile,
-			event.PARENT_CLOCK_CLASS:       p.ParentDataSet.GrandmasterClockClass,
+			event.PARENT_DATA_SET:          p.ParentDataSet,
 			event.TIME_PROPERTIES_DATA_SET: p.TimePropertiesDataSet,
 		},
 	}:

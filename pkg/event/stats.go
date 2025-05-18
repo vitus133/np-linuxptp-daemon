@@ -111,6 +111,7 @@ func (d *Data) AddEvent(event EventChannel) {
 	// ptp4l signalSource, same as GNSS signal source, can be a Leading source
 	leading, found := event.Values[LEADING_SOURCE]
 	if found && leading.(bool) {
+		glog.Info(details.IFace, " is set as the leading source ")
 		details.signalSource = PTP4l
 	}
 	d.logData = details.logData
