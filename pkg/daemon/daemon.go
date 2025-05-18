@@ -176,6 +176,7 @@ type ptpProcess struct {
 	depProcess                []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
 	nodeProfile               ptpv1.PtpProfile
 	ParentDataSet             *protocol.ParentDataSet
+	TimePropertiesDataSet     *protocol.TimePropertiesDS
 	pmcCheck                  bool
 	clockType                 event.ClockType
 	ptpClockThreshold         *ptpv1.PtpClockThreshold
@@ -942,6 +943,20 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	} else {
 		glog.Errorf("error parsing PMC util for clock class change event %s", e.Error())
 	}
+	err := p.getTimePropertiesDS()
+	if err != nil {
+		glog.Errorf("failed to get time properties DataSet %s", err.Error())
+	}
+	p.sendPtp4lEvent(event.PTP_UNKNOWN)
+}
+
+func (p *ptpProcess) getTimePropertiesDS() error {
+	tp, err := pmc.RunPMCExpGetTimePropertiesDS(p.configName)
+	if err != nil {
+		return err
+	}
+	p.TimePropertiesDataSet = &tp
+	return nil
 }
 
 // cmdRun runs given ptpProcess and restarts on errors
@@ -1562,8 +1577,9 @@ func (p *ptpProcess) sendPtp4lEvent(state event.PTPState) {
 		Time:        time.Now().UnixMilli(),
 		Reset:       false,
 		Values: map[event.ValueType]interface{}{
-			event.CONTROLLED_PORTS_CONFIG: p.controlledPortsConfigFile,
-			event.PARENT_CLOCK_CLASS:      p.ParentDataSet.GrandmasterClockClass,
+			event.CONTROLLED_PORTS_CONFIG:  p.controlledPortsConfigFile,
+			event.PARENT_CLOCK_CLASS:       p.ParentDataSet.GrandmasterClockClass,
+			event.TIME_PROPERTIES_DATA_SET: p.TimePropertiesDataSet,
 		},
 	}:
 	default:

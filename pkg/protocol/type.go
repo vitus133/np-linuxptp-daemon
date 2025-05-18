@@ -46,6 +46,17 @@ type ParentDataSet struct {
 	GrandmasterIdentity                   string
 }
 
+type ExternalGrandmasterProperties struct {
+	GrandmasterIdentity string
+	StepsRemoved        uint16
+}
+
+type CurrentDS struct {
+	StepsRemoved     uint16
+	offsetFromMaster float64
+	meanPathDelay    float64
+}
+
 func (g *GrandmasterSettings) String() string {
 	if g == nil {
 		glog.Error("returned empty grandmasterSettings")
@@ -162,19 +173,35 @@ func stou16h(s string) uint16 {
 	return uint16(uint64Value)
 }
 
-func stou32h(s string) uint32 {
-	uint64Value, err := strconv.ParseUint(strings.Replace(s, "0x", "", 1), 16, 32)
+func stou16(s string) uint16 {
+	uint64Value, err := strconv.ParseUint(s, 10, 16)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 	}
-	return uint32(uint64Value)
+	return uint16(uint64Value)
 }
+
 func stoi32(s string) int32 {
 	int64Value, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 	}
 	return int32(int64Value)
+}
+
+func stof64(s string) float64 {
+	f64val, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+	}
+	return f64val
+}
+func stou32h(s string) uint32 {
+	uint64Value, err := strconv.ParseUint(strings.Replace(s, "0x", "", 1), 16, 32)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+	}
+	return uint32(uint64Value)
 }
 
 func (p *ParentDataSet) ValueRegEx() map[string]string {
@@ -227,5 +254,118 @@ func (p *ParentDataSet) Update(key string, value string) {
 		p.GrandmasterPriority2 = stou8(value)
 	case "grandmasterIdentity":
 		p.GrandmasterIdentity = value
+	}
+}
+
+func (e *ExternalGrandmasterProperties) ValueRegEx() map[string]string {
+	return map[string]string{
+		"gmIdentity":   `(\d*\.\d*\.\d*)`,
+		"stepsRemoved": `(\d+)`,
+	}
+}
+func (e *ExternalGrandmasterProperties) RegEx() string {
+	result := ""
+	for _, k := range e.Keys() {
+		result += `[[:space:]]+` + k + `[[:space:]]+` + e.ValueRegEx()[k]
+	}
+	return result
+}
+
+func (e *ExternalGrandmasterProperties) Keys() []string {
+	return []string{"gmIdentity", "stepsRemoved"}
+}
+
+func (e *ExternalGrandmasterProperties) Update(key string, value string) {
+	switch key {
+	case "gmIdentity":
+		e.GrandmasterIdentity = value
+	case "stepsRemoved":
+		e.StepsRemoved = stou16(value)
+	}
+}
+
+func (egp *ExternalGrandmasterProperties) String() string {
+	if egp == nil {
+		glog.Error("returned empty grandmasterSettings")
+		return ""
+	}
+	result := fmt.Sprintf(" gmIdentity %s\n", egp.GrandmasterIdentity)
+	result += fmt.Sprintf(" stepsRemoved        %d\n", egp.StepsRemoved)
+	return result
+}
+
+func (c *CurrentDS) ValueRegEx() map[string]string {
+	return map[string]string{
+		"stepsRemoved":     `(\d+)`,
+		"offsetFromMaster": `(-?\d+\.\d+)`,
+		"meanPathDelay":    `(\d+\.\d+)`,
+	}
+}
+func (c *CurrentDS) RegEx() string {
+	result := ""
+	for _, k := range c.Keys() {
+		result += `[[:space:]]+` + k + `[[:space:]]+` + c.ValueRegEx()[k]
+	}
+	return result
+}
+
+func (c *CurrentDS) Keys() []string {
+	return []string{"stepsRemoved", "offsetFromMaster", "meanPathDelay"}
+}
+
+func (c *CurrentDS) Update(key string, value string) {
+	switch key {
+	case "stepsRemoved":
+		c.StepsRemoved = stou16(value)
+	case "offsetFromMaster":
+		c.offsetFromMaster = stof64(value)
+	case "meanPathDelay":
+		c.meanPathDelay = stof64(value)
+	}
+}
+
+func (tp *TimePropertiesDS) ValueRegEx() map[string]string {
+	return map[string]string{
+		"currentUtcOffset":      `(\d+)`,
+		"currentUtcOffsetValid": `([01])`,
+		"leap59":                `([01])`,
+		"leap61":                `([01])`,
+		"timeTraceable":         `([01])`,
+		"frequencyTraceable":    `([01])`,
+		"ptpTimescale":          `([01])`,
+		"timeSource":            `(0x[\da-f]+)`,
+	}
+}
+func (tp *TimePropertiesDS) RegEx() string {
+	result := ""
+	for _, k := range tp.Keys() {
+		result += `[[:space:]]+` + k + `[[:space:]]+` + tp.ValueRegEx()[k]
+	}
+	return result
+}
+
+func (tp *TimePropertiesDS) Keys() []string {
+	return []string{"currentUtcOffset", "leap61", "leap59", "currentUtcOffsetValid", "ptpTimescale",
+		"timeTraceable", "frequencyTraceable", "timeSource"}
+}
+
+func (tp *TimePropertiesDS) Update(key string, value string) {
+	switch key {
+	case "currentUtcOffset":
+		tp.CurrentUtcOffset = stoi32(value)
+	case "currentUtcOffsetValid":
+		tp.CurrentUtcOffsetValid = stob(value)
+	case "leap59":
+		tp.Leap59 = stob(value)
+	case "leap61":
+		tp.Leap61 = stob(value)
+	case "timeTraceable":
+		tp.TimeTraceable = stob(value)
+	case "frequencyTraceable":
+		tp.FrequencyTraceable = stob(value)
+	case "ptpTimescale":
+		tp.PtpTimescale = stob(value)
+	case "timeSource":
+		tp.TimeSource = protocol.TimeSource(stou8h(value))
 	}
 }

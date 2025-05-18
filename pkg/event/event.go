@@ -49,6 +49,7 @@ const (
 	IN_SYNC_CONDITION_TIMES     ValueType = "in-sync-times"
 	CONTROLLED_PORTS_CONFIG     ValueType = "controlled-ports-config"
 	PARENT_CLOCK_CLASS          ValueType = "parent_clock_class"
+	TIME_PROPERTIES_DATA_SET    ValueType = "timeProps"
 	FaultyPhaseOffset                     = 99999999999
 )
 
@@ -484,7 +485,6 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	cfgName := event.CfgName
 	dpllState := PTP_NOTSET
 	ts2phcState := PTP_FREERUN
-	// ptp4lState := PTP_FREERUN
 
 	syncSrcLost := e.isSourceLost(cfgName)
 	leadingInterface := e.getLeadingInterface(cfgName)
@@ -513,7 +513,6 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 			case TS2PHCProcessName:
 				ts2phcState = d.State
 			case PTP4lProcessName:
-				// ptp4lState = d.State
 			}
 		}
 	} else {
@@ -530,9 +529,6 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	case PTP_NOTSET, PTP_FREERUN:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_LOCKED
-			// all is locked and DPLL is LHAQ - set clock class to 135 for the next holdover
-			// ptp4l will convey GM's clock class
-			e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(135)
 			glog.Info("BC FSM: FREERUN to LOCKED")
 		}
 	case PTP_LOCKED:
@@ -548,10 +544,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	case PTP_HOLDOVER:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_LOCKED
-			// all is locked and DPLL is LHAQ - set clock class to 135 for the next holdover
-			// ptp4l will convey GM's clock class
 			glog.Info("BC FSM: HOLDOVER to LOCKED")
-			e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(135)
 
 		} else if e.freeRunCondition(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_FREERUN
@@ -602,6 +595,10 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		rclockSyncState.clkLog = clkLog
 		glog.Infof("dpll State %s, tsphc state %s, BC state %s, BC offset %d",
 			dpllState, ts2phcState, e.clkSyncState[cfgName].state, e.clkSyncState[cfgName].clockOffset)
+	}
+	if event.ProcessName == PTP4l {
+		// TODO: Dataset Interworking function here
+
 	}
 	return rclockSyncState
 }
