@@ -1586,6 +1586,7 @@ func (p *ptpProcess) sendPtp4lEvent() {
 			}
 			return true
 		}(),
+		OutOfSpec: false,
 		Values: map[event.ValueType]interface{}{
 			event.CONTROLLED_PORTS_CONFIG:  p.controlledPortsConfigFile,
 			event.PARENT_DATA_SET:          p.ParentDataSet,

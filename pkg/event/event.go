@@ -513,6 +513,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	}
 
 	if _, ok := e.clkSyncState[cfgName]; !ok {
+		glog.Info("initializing e.clkSyncState for ", cfgName)
 		e.clkSyncState[cfgName] = &clockSyncState{
 			state:         PTP_FREERUN,
 			clockClass:    protocol.ClockClassUninitialized,
@@ -521,7 +522,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 			leadingIFace:  leadingInterface,
 		}
 	}
-
+	// glog.Infof("cfgName %s syncSourceLost %t, leadingIface %s e.clkSyncState %++v", cfgName, syncSrcLost, leadingInterface, e.clkSyncState)
 	e.clkSyncState[cfgName].sourceLost = syncSrcLost
 	e.clkSyncState[cfgName].leadingIFace = leadingInterface
 	if data, ok := e.data[cfgName]; ok {
@@ -535,6 +536,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 			}
 		}
 	} else {
+		glog.Info("initializing default e.clkSyncState for ", cfgName)
 		e.clkSyncState[cfgName].state = PTP_FREERUN
 		e.clkSyncState[cfgName].clockClass = protocol.ClockClassFreerun
 		e.clkSyncState[cfgName].clockAccuracy = fbprotocol.ClockAccuracyUnknown
@@ -543,7 +545,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		e.clkSyncState[cfgName].clkLog = fmt.Sprintf("%s[%d]:[%s] %s T-BC-STATUS %s\n", BC, e.clkSyncState[cfgName].lastLoggedTime, cfgName, leadingInterface, e.clkSyncState[cfgName].state)
 		return *e.clkSyncState[cfgName]
 	}
-	glog.Info("Current state ", e.clkSyncState[cfgName].state)
+
 	switch e.clkSyncState[cfgName].state {
 	case PTP_NOTSET, PTP_FREERUN:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
@@ -920,7 +922,7 @@ connect:
 				}
 				continue
 			}
-			glog.Infof("%++v", event)
+			// glog.Infof("%++v", event)
 			var logOut []string
 			logDataValues := ""
 			if event.ProcessName == SYNCE {
@@ -933,9 +935,11 @@ connect:
 			} else {
 
 				// Update the in MemData
-				dataDetails := e.addEvent(event)
+
 				var clockState clockSyncState
+				var dataDetails *DataDetails
 				if event.ClockType == GM {
+					dataDetails = e.addEvent(event)
 					// Computes GM state
 					clockState = e.updateGMState(event.CfgName)
 					// right now if GPS offset || mode is bad then consider source lost
@@ -948,6 +952,9 @@ connect:
 						}
 					}
 				} else {
+
+					event = e.convergeConfig(event)
+					dataDetails = e.addEvent(event)
 					clockState = e.updateBCState(event)
 				}
 				logDataValues = dataDetails.logData
@@ -1309,9 +1316,7 @@ func (e *EventHandler) GetData(cfgName string, processName EventSource) *Data {
 }
 
 func (e *EventHandler) addEvent(event EventChannel) *DataDetails {
-	if event.ClockType == BC {
-		event = e.convergeConfig(event)
-	}
+	glog.Infof("%++v", event)
 	d := e.GetData(event.CfgName, event.ProcessName)
 	d.AddEvent(event)
 
@@ -1386,30 +1391,28 @@ func (e *EventHandler) updateLeadingClockData(event EventChannel) {
 		tp, found := event.Values[TIME_PROPERTIES_DATA_SET].(*protocol.TimePropertiesDS)
 		if found {
 			e.LeadingClockData.upstreamTimeProperties = tp
-			glog.Infof("%++v", tp)
 		}
 		cpc, found := event.Values[CONTROLLED_PORTS_CONFIG].(string)
 		if found {
 			e.LeadingClockData.controlledPortsConfig = cpc
-			glog.Infof("%++v", cpc)
 		}
 		pds, found := event.Values[PARENT_DATA_SET].(*protocol.ParentDataSet)
 		if found {
 			e.LeadingClockData.upstreamParentDataSet = pds
-			glog.Infof("%++v", pds)
 		}
 	case DPLL:
 		ls, found := event.Values[LEADING_SOURCE].(bool)
 		if found && ls {
 			e.LeadingClockData.leadingInterface = event.IFace
 		}
-		inSyncTh, found := event.Values[IN_SYNC_CONDITION_THRESHOLD].(int)
+		inSyncTh, found := event.Values[IN_SYNC_CONDITION_THRESHOLD].(uint64)
 		if found {
 			e.LeadingClockData.inSyncConditionThreshold = int(inSyncTh)
 		}
-		inSyncTimes, found := event.Values[IN_SYNC_CONDITION_TIMES].(int)
+		inSyncTimes, found := event.Values[IN_SYNC_CONDITION_TIMES].(uint64)
 		if found {
-			// TODO: implement FIR and use it
+			// TODO: implement counter of items below the thres
+			// hold and use it
 			e.LeadingClockData.inSyncConditionTimes = int(inSyncTimes)
 		}
 		toFreeRunTh, found := event.Values[TO_FREERUN_THRESHOLD].(uint64)
