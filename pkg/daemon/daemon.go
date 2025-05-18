@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/config"
@@ -174,7 +175,7 @@ type ptpProcess struct {
 	cmd                       *exec.Cmd
 	depProcess                []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
 	nodeProfile               ptpv1.PtpProfile
-	parentClockClass          float64
+	ParentDataSet             *protocol.ParentDataSet
 	pmcCheck                  bool
 	clockType                 event.ClockType
 	ptpClockThreshold         *ptpv1.PtpClockThreshold
@@ -917,37 +918,26 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 			glog.Errorf("updateClockClass Recovered in f %#v", r)
 		}
 	}()
-	var clockClassOut string
-	if _, matches, e := pmc.RunPMCExp(p.configName, pmc.CmdGetParentDataSet, pmc.ClockClassChangeRegEx); e == nil {
-		//regex: 'gm.ClockClass[[:space:]]+(\d+)'
-		//match  1: 'gm.ClockClass                         135'
-		//match  2: '135'
-		if len(matches) > 1 {
-			var parseError error
-			var clockClass float64
-			if clockClass, parseError = strconv.ParseFloat(matches[1], 64); parseError == nil {
-				if clockClass != p.parentClockClass {
-					p.parentClockClass = clockClass
-					glog.Infof("clock change event identified")
-					fmt.Printf("%s", clockClassOut)
-				}
-				//ptp4l[5196819.100]: [ptp4l.0.config] CLOCK_CLASS_CHANGE:248
-				// change to pint every minute or when the clock class changes
-				clockClassOut = fmt.Sprintf("%s[%d]:[%s] CLOCK_CLASS_CHANGE %f\n", p.name, time.Now().Unix(), p.configName, p.parentClockClass)
-				if c == nil {
-					UpdateClockClassMetrics(clockClass) // no socket then update metrics
-				} else {
-					_, err := (*c).Write([]byte(clockClassOut))
-					if err != nil {
-						glog.Errorf("failed to write class change event %s", err.Error())
-					}
-				}
 
-			} else {
-				glog.Errorf("parse error in clock class value %s", parseError)
-			}
+	if r, e := pmc.RunPMCExpGetParentDS(p.configName); e == nil {
+		glog.Infof("%++v", r)
+		if p.ParentDataSet == nil {
+			p.ParentDataSet = &protocol.ParentDataSet{}
+		}
+		if r.GrandmasterClockClass != p.ParentDataSet.GrandmasterClockClass {
+			glog.Infof("clock change event identified: %d -> %d", p.ParentDataSet.GrandmasterClockClass, r.GrandmasterClockClass)
+			p.ParentDataSet = &r
+		}
+		//ptp4l[5196819.100]: [ptp4l.0.config] CLOCK_CLASS_CHANGE:248
+		// change to pint every minute or when the clock class changes
+		if c == nil {
+			UpdateClockClassMetrics(float64(p.ParentDataSet.GrandmasterClockClass)) // no socket then update metrics
 		} else {
-			glog.Infof("clock class change value not found via PMC")
+			clockClassOut := fmt.Sprintf("%s[%d]:[%s] CLOCK_CLASS_CHANGE %d\n", p.name, time.Now().Unix(), p.configName, p.ParentDataSet.GrandmasterClockClass)
+			_, err := (*c).Write([]byte(clockClassOut))
+			if err != nil {
+				glog.Errorf("failed to write class change event %s", err.Error())
+			}
 		}
 	} else {
 		glog.Errorf("error parsing PMC util for clock class change event %s", e.Error())
@@ -1573,7 +1563,7 @@ func (p *ptpProcess) sendPtp4lEvent(state event.PTPState) {
 		Reset:       false,
 		Values: map[event.ValueType]interface{}{
 			event.CONTROLLED_PORTS_CONFIG: p.controlledPortsConfigFile,
-			event.PARENT_CLOCK_CLASS:      p.parentClockClass,
+			event.PARENT_CLOCK_CLASS:      p.ParentDataSet.GrandmasterClockClass,
 		},
 	}:
 	default:

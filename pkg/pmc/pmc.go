@@ -136,3 +136,47 @@ func RunPMCExpSetGMSettings(configFileName string, g protocol.GrandmasterSetting
 	}
 	return
 }
+
+// RunPMCExpGetGMSettings ... get current GRANDMASTER_SETTINGS_NP
+func RunPMCExpGetParentDS(configFileName string) (p protocol.ParentDataSet, err error) {
+	cmdStr := CmdGetParentDataSet
+	pmcCmd := fmt.Sprintf("pmc -u -b 0 -f /var/run/%s", configFileName)
+	glog.Infof("%s \"%s\"", pmcCmd, cmdStr)
+	e, r, err := expect.Spawn(pmcCmd, -1)
+	if err != nil {
+		return p, err
+	}
+	defer func() {
+		e.SendSignal(syscall.SIGTERM)
+		for timeout := time.After(sigTimeout); ; {
+			select {
+			case <-r:
+				e.Close()
+				return
+			case <-timeout:
+				e.Send("\x03")
+				e.Close()
+				return
+			}
+		}
+	}()
+
+	for range numRetry {
+		if err = e.Send(cmdStr + "\n"); err == nil {
+			result, matches, err := e.Expect(regexp.MustCompile(p.RegEx()), cmdTimeout)
+			if err != nil {
+				if _, ok := err.(expect.TimeoutError); ok {
+					continue
+				}
+				glog.Errorf("pmc result match error %v", err)
+				return p, err
+			}
+			glog.Infof("pmc result: %s", result)
+			for i, m := range matches[1:] {
+				p.Update(p.Keys()[i], m)
+			}
+			break
+		}
+	}
+	return
+}

@@ -2,9 +2,10 @@ package protocol
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"strconv"
 	"strings"
+
+	"github.com/golang/glog"
 
 	"github.com/facebook/time/ptp/protocol"
 )
@@ -30,6 +31,19 @@ type TimePropertiesDS struct {
 	FrequencyTraceable    bool
 	PtpTimescale          bool
 	TimeSource            protocol.TimeSource
+}
+
+type ParentDataSet struct {
+	ParentPortIdentity                    string
+	ParentStats                           uint8
+	ObservedParentOffsetScaledLogVariance uint16
+	ObservedParentClockPhaseChangeRate    uint32
+	GrandmasterPriority1                  uint8
+	GrandmasterClockClass                 uint8
+	GrandmasterClockAccuracy              uint8
+	GrandmasterOffsetScaledLogVariance    uint16
+	GrandmasterPriority2                  uint8
+	GrandmasterIdentity                   string
 }
 
 func (g *GrandmasterSettings) String() string {
@@ -148,10 +162,70 @@ func stou16h(s string) uint16 {
 	return uint16(uint64Value)
 }
 
+func stou32h(s string) uint32 {
+	uint64Value, err := strconv.ParseUint(strings.Replace(s, "0x", "", 1), 16, 32)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+	}
+	return uint32(uint64Value)
+}
 func stoi32(s string) int32 {
 	int64Value, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 	}
 	return int32(int64Value)
+}
+
+func (p *ParentDataSet) ValueRegEx() map[string]string {
+	return map[string]string{
+		"parentPortIdentity":                    `(\d*\.\d*\.\d*\-\d*)`,
+		"parentStats":                           `(\d+)`,
+		"observedParentOffsetScaledLogVariance": `(0x[\da-f]+)`,
+		"observedParentClockPhaseChangeRate":    `(0x[\da-f]+)`,
+		"grandmasterPriority1":                  `(\d+)`,
+		"gm.ClockClass":                         `(\d+)`,
+		"gm.ClockAccuracy":                      `(0x[\da-f]+)`,
+		"gm.OffsetScaledLogVariance":            `(0x[\da-f]+)`,
+		"grandmasterPriority2":                  `(\d+)`,
+		"grandmasterIdentity":                   `(\d*\.\d*\.\d*)`,
+	}
+}
+func (p *ParentDataSet) RegEx() string {
+	result := ""
+	for _, k := range p.Keys() {
+		result += `[[:space:]]+` + k + `[[:space:]]+` + p.ValueRegEx()[k]
+	}
+	return result
+}
+
+func (p *ParentDataSet) Keys() []string {
+	return []string{"parentPortIdentity", "parentStats", "observedParentOffsetScaledLogVariance",
+		"observedParentClockPhaseChangeRate", "grandmasterPriority1", "gm.ClockClass", "gm.ClockAccuracy",
+		"gm.OffsetScaledLogVariance", "grandmasterPriority2", "grandmasterIdentity"}
+}
+
+func (p *ParentDataSet) Update(key string, value string) {
+	switch key {
+	case "parentPortIdentity":
+		p.ParentPortIdentity = value
+	case "parentStats":
+		p.ParentStats = (stou8(value))
+	case "observedParentOffsetScaledLogVariance":
+		p.ObservedParentOffsetScaledLogVariance = stou16h(value)
+	case "observedParentClockPhaseChangeRate":
+		p.ObservedParentClockPhaseChangeRate = stou32h(value)
+	case "grandmasterPriority1":
+		p.GrandmasterPriority1 = stou8(value)
+	case "gm.ClockClass":
+		p.GrandmasterClockClass = stou8(value)
+	case "gm.ClockAccuracy":
+		p.GrandmasterClockAccuracy = stou8h(value)
+	case "gm.OffsetScaledLogVariance":
+		p.GrandmasterOffsetScaledLogVariance = stou16h(value)
+	case "grandmasterPriority2":
+		p.GrandmasterPriority2 = stou8(value)
+	case "grandmasterIdentity":
+		p.GrandmasterIdentity = value
+	}
 }
