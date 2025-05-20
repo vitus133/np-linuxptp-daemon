@@ -22,6 +22,7 @@ var (
 	CmdGetExternalGMPropertiesNP = "GET EXTERNAL_GRANDMASTER_PROPERTIES_NP"
 	CmdSetExternalGMPropertiesNP = "SET EXTERNAL_GRANDMASTER_PROPERTIES_NP"
 	CmdGetTimePropertiesDS       = "GET TIME_PROPERTIES_DATA_SET"
+	CmdGetCurrentDS              = "GET CURRENT_DATA_SET"
 	cmdTimeout                   = 2000 * time.Millisecond
 	sigTimeout                   = 500 * time.Millisecond
 	numRetry                     = 6
@@ -164,7 +165,8 @@ func RunPMCExpGetParentDS(configFileName string) (p protocol.ParentDataSet, err 
 		}
 	}()
 
-	for range numRetry {
+	for i := 0; i < numRetry; i++ {
+		glog.Info("%s retry %d", CmdGetParentDataSet, i)
 		if err = e.Send(cmdStr + "\n"); err == nil {
 			result, matches, err := e.Expect(regexp.MustCompile(p.RegEx()), cmdTimeout)
 			if err != nil {
@@ -233,6 +235,8 @@ func RunPMCExpSetExternalGMPropertiesNP(configFileName string, egp protocol.Exte
 	cmdStr := CmdSetExternalGMPropertiesNP
 	cmdStr += strings.Replace(egp.String(), "\n", " ", -1)
 	pmcCmd := fmt.Sprintf("pmc -u -b 0 -f /var/run/%s", configFileName)
+	glog.Infof("Sending %s %s", pmcCmd, cmdStr)
+
 	e, r, err := expect.Spawn(pmcCmd, -1)
 	if err != nil {
 		return err
@@ -253,9 +257,10 @@ func RunPMCExpSetExternalGMPropertiesNP(configFileName string, egp protocol.Exte
 	}()
 
 	if err = e.Send(cmdStr + "\n"); err == nil {
-		result, _, err := e.Expect(regexp.MustCompile(egp.RegEx()), cmdTimeout)
+		result, dbg, err := e.Expect(regexp.MustCompile(egp.RegEx()), cmdTimeout)
 		if err != nil {
 			glog.Errorf("pmc result match error %v", err)
+			glog.Errorf("pmc result: %s", dbg)
 			return err
 		}
 		glog.Infof("pmc result: %s", result)
@@ -301,6 +306,50 @@ func RunPMCExpGetTimePropertiesDS(configFileName string) (tp protocol.TimeProper
 				tp.Update(tp.Keys()[i], m)
 			}
 			glog.Infof("pmc result: %++v", tp)
+			break
+		}
+	}
+	return
+}
+
+// RunPMCExpGetTimePropertiesDS ... "GET TIME_PROPERTIES_DATA_SET"
+func RunPMCExpGetCurrentDS(configFileName string) (cds protocol.CurrentDS, err error) {
+	cmdStr := CmdGetCurrentDS
+	pmcCmd := fmt.Sprintf("pmc -u -b 0 -f /var/run/%s", configFileName)
+	glog.Infof("%s \"%s\"", pmcCmd, cmdStr)
+	e, r, err := expect.Spawn(pmcCmd, -1)
+	if err != nil {
+		return
+	}
+	defer func() {
+		e.SendSignal(syscall.SIGTERM)
+		for timeout := time.After(sigTimeout); ; {
+			select {
+			case <-r:
+				e.Close()
+				return
+			case <-timeout:
+				e.Send("\x03")
+				e.Close()
+				return
+			}
+		}
+	}()
+
+	for range numRetry {
+		if err = e.Send(cmdStr + "\n"); err == nil {
+			_, matches, err := e.Expect(regexp.MustCompile(cds.RegEx()), cmdTimeout)
+			if err != nil {
+				if _, ok := err.(expect.TimeoutError); ok {
+					continue
+				}
+				glog.Errorf("pmc result match error %v", err)
+				return cds, err
+			}
+			for i, m := range matches[1:] {
+				cds.Update(cds.Keys()[i], m)
+			}
+			glog.Infof("pmc result: %++v", cds)
 			break
 		}
 	}

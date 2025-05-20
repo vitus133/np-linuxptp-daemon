@@ -50,7 +50,9 @@ const (
 	TO_FREERUN_THRESHOLD        ValueType = "free-run_th"
 	CONTROLLED_PORTS_CONFIG     ValueType = "controlled-ports-config"
 	PARENT_DATA_SET             ValueType = "parent-ds"
+	CURRENT_DATA_SET            ValueType = "current-ds"
 	TIME_PROPERTIES_DATA_SET    ValueType = "time-props"
+	MAX_IN_SPEC_OFFSET          ValueType = "max-in-spec"
 	FaultyPhaseOffset                     = 99999999999
 )
 
@@ -208,17 +210,23 @@ var (
 // LeadingClockParams ... leading clock parameters includes state
 // and configuration of the system leading clock. There is only
 // one leading clock in the system. The leading clock is the clock that
-// receives phase, frequency and ToD synchronization from the PRTC / T-GM / T/BC.
+// receives phase, frequency and ToD synchronization from an external source.
 // Currently used for T-BC only
 type LeadingClockParams struct {
-	upstreamTimeProperties   *protocol.TimePropertiesDS
-	upstreamParentDataSet    *protocol.ParentDataSet
-	leadingInterface         string
-	leadingInterfaceConfig   string
-	controlledPortsConfig    string
-	inSyncConditionThreshold int
-	inSyncConditionTimes     int
-	toFreeRunThreshold       int
+	upstreamTimeProperties        *protocol.TimePropertiesDS
+	upstreamParentDataSet         *protocol.ParentDataSet
+	upstreamCurrentDSStepsRemoved uint16
+	downstreamTimeProperties      *protocol.TimePropertiesDS
+	// downstreamParentDataSet         *protocol.ParentDataSet
+	downstreamCurrentDSStepsRemoved uint16
+	leadingInterface                string
+	leadingInterfaceConfig          string
+	controlledPortsConfig           string
+	inSyncConditionThreshold        int
+	inSyncConditionTimes            int
+	toFreeRunThreshold              int
+	MaxInSpecOffset                 uint64
+	lastInSpec                      bool
 }
 
 // MockEnable ...
@@ -504,6 +512,10 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	cfgName := event.CfgName
 	dpllState := PTP_NOTSET
 	ts2phcState := PTP_FREERUN
+	// For internal data announces, only update the downstream data on class change
+	// For External GM data announes in the locked state, update whenever any of the
+	// information elements change
+	updateDownstreamData := false
 
 	syncSrcLost := e.isSourceLost(cfgName)
 	leadingInterface := e.getLeadingInterfaceBC()
@@ -551,37 +563,50 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_LOCKED
 			glog.Info("BC FSM: FREERUN to LOCKED")
+			updateDownstreamData = true
 		}
 	case PTP_LOCKED:
 		if e.freeRunCondition(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_FREERUN
 			e.clkSyncState[cfgName].clockClass = protocol.ClockClassFreerun
 			glog.Info("BC FSM: LOCKED to FREERUN")
+			updateDownstreamData = true
+
 		} else if e.isSourceLostBC(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_HOLDOVER
 			e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(135)
 			glog.Info("BC FSM: LOCKED to HOLDOVER")
+			e.LeadingClockData.lastInSpec = true
+			updateDownstreamData = true
 		}
 	case PTP_HOLDOVER:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_LOCKED
 			glog.Info("BC FSM: HOLDOVER to LOCKED")
+			updateDownstreamData = true
 
 		} else if e.freeRunCondition(cfgName) {
 			e.clkSyncState[cfgName].state = PTP_FREERUN
 			e.clkSyncState[cfgName].clockClass = protocol.ClockClassFreerun
 			glog.Info("BC FSM: HOLDOVER to FREERUN")
+			updateDownstreamData = true
 		} else {
 			if event.IFace == leadingInterface {
-				if e.outOfSpec {
-					if e.clkSyncState[cfgName].clockClass != fbprotocol.ClockClass(165) {
-						e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(165)
-						glog.Info("BC FSM: HOLDOVER sub-state Out Of Spec")
-					}
-				} else {
-					if e.clkSyncState[cfgName].clockClass != fbprotocol.ClockClass(135) {
-						e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(135)
-						glog.Info("BC FSM: HOLDOVER sub-state In Spec")
+				inSpec := e.inSpecCondition(cfgName)
+				if e.LeadingClockData.lastInSpec != inSpec {
+					e.LeadingClockData.lastInSpec = inSpec
+					if !inSpec {
+						if e.clkSyncState[cfgName].clockClass != fbprotocol.ClockClass(165) {
+							e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(165)
+							glog.Info("BC FSM: HOLDOVER sub-state Out Of Spec")
+							updateDownstreamData = true
+						}
+					} else {
+						if e.clkSyncState[cfgName].clockClass != fbprotocol.ClockClass(135) {
+							e.clkSyncState[cfgName].clockClass = fbprotocol.ClockClass(135)
+							glog.Info("BC FSM: HOLDOVER sub-state In Spec")
+							updateDownstreamData = true
+						}
 					}
 				}
 			}
@@ -605,10 +630,20 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	} else {
 		e.clkSyncState[cfgName].clockOffset = e.getLargestOffset(cfgName)
 	}
+
+	if updateDownstreamData {
+		if gSycState.state == PTP_LOCKED {
+			if e.LeadingClockData.upstreamParentDataSet != nil && e.LeadingClockData.upstreamTimeProperties != nil {
+				go e.downstreamAnnounceIWF(e.LeadingClockData.upstreamCurrentDSStepsRemoved,
+					*e.LeadingClockData.upstreamParentDataSet, *e.LeadingClockData.upstreamTimeProperties)
+			}
+		} else {
+			go e.announceLocalData(cfgName)
+		}
+	}
 	// this will reduce log noise and prints 1 per sec
 	logTime := time.Now().Unix()
 	if e.clkSyncState[cfgName].lastLoggedTime != logTime {
-
 		clkLog := fmt.Sprintf("%s[%d]:[%s] %s offset %d T-BC-STATUS %s\n",
 			BC, logTime, cfgName, gSycState.leadingIFace, e.clkSyncState[cfgName].clockOffset, gSycState.state)
 		e.clkSyncState[cfgName].lastLoggedTime = logTime
@@ -617,13 +652,89 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		glog.Infof("dpll State %s, tsphc state %s, BC state %s, BC offset %d",
 			dpllState, ts2phcState, e.clkSyncState[cfgName].state, e.clkSyncState[cfgName].clockOffset)
 	}
-	if event.ProcessName == PTP4l {
-		// TODO: Dataset Interworking function here
-		tp := event.Values[TIME_PROPERTIES_DATA_SET].(*protocol.TimePropertiesDS)
-		glog.Infof("leading iface event %++v", tp)
-
-	}
 	return rclockSyncState
+}
+
+// Implements Rec. ITU-T G.8275 (2024) Amd. 1 (08/2024)
+// Table VIII.3 − T-BC-/ T-BC-P/ T-BC-A Announce message contents
+// for free-run (acquiring), holdover within / out of the specification
+func (e *EventHandler) announceLocalData(cfgName string) {
+	glog.Info("in announceLocalData")
+
+	egp := protocol.ExternalGrandmasterProperties{
+		GrandmasterIdentity: "507c6f.fffe.1fb218",
+		StepsRemoved:        0,
+	}
+	glog.Infof("EGP %++v", egp)
+	go pmc.RunPMCExpSetExternalGMPropertiesNP(e.LeadingClockData.controlledPortsConfig, egp)
+
+	gs := protocol.GrandmasterSettings{
+		ClockQuality: fbprotocol.ClockQuality{
+			ClockClass:              e.clkSyncState[cfgName].clockClass,
+			ClockAccuracy:           fbprotocol.ClockAccuracyUnknown,
+			OffsetScaledLogVariance: 0xffff,
+		},
+		TimePropertiesDS: protocol.TimePropertiesDS{
+			TimeSource: fbprotocol.TimeSourceInternalOscillator,
+		},
+	}
+	switch e.clkSyncState[cfgName].clockClass {
+	case protocol.ClockClassFreerun:
+		gs.TimePropertiesDS.CurrentUtcOffsetValid = false
+		gs.TimePropertiesDS.Leap59 = false
+		gs.TimePropertiesDS.Leap61 = false
+		gs.TimePropertiesDS.PtpTimescale = true
+		gs.TimePropertiesDS.TimeTraceable = false
+		// TODO: get the real freq traceability status when implemented
+		gs.TimePropertiesDS.FrequencyTraceable = false
+		gs.TimePropertiesDS.CurrentUtcOffset = int32(leap.GetUtcOffset())
+	case fbprotocol.ClockClass(165), fbprotocol.ClockClass(135):
+		if e.LeadingClockData.upstreamTimeProperties == nil {
+			glog.Info("Pending upstream clock data acquisition, skip updates")
+			return
+		}
+		gs.TimePropertiesDS.CurrentUtcOffsetValid = e.LeadingClockData.upstreamTimeProperties.CurrentUtcOffsetValid
+		gs.TimePropertiesDS.Leap59 = e.LeadingClockData.upstreamTimeProperties.Leap59
+		gs.TimePropertiesDS.Leap61 = e.LeadingClockData.upstreamTimeProperties.Leap61
+		gs.TimePropertiesDS.PtpTimescale = true
+		if e.clkSyncState[cfgName].clockClass == fbprotocol.ClockClass(135) {
+			gs.TimePropertiesDS.TimeTraceable = true
+		} else {
+			gs.TimePropertiesDS.TimeTraceable = false
+		}
+		// TODO: get the real freq traceability status when implemented
+		gs.TimePropertiesDS.FrequencyTraceable = false
+		gs.TimePropertiesDS.CurrentUtcOffset = e.LeadingClockData.upstreamTimeProperties.CurrentUtcOffset
+
+	default:
+	}
+	// pmcCmd := fmt.Sprintf("pmc -u -b 0 -f /var/run/%s", cfgName)
+
+	go pmc.RunPMCExpSetGMSettings(e.LeadingClockData.controlledPortsConfig, gs)
+}
+
+func (e *EventHandler) downstreamAnnounceIWF(stepsRemoved uint16, pds protocol.ParentDataSet, tp protocol.TimePropertiesDS) {
+
+	gs := protocol.GrandmasterSettings{
+		ClockQuality: fbprotocol.ClockQuality{
+			ClockClass:              fbprotocol.ClockClass(pds.GrandmasterClockClass),
+			ClockAccuracy:           fbprotocol.ClockAccuracy(pds.GrandmasterClockAccuracy),
+			OffsetScaledLogVariance: pds.ObservedParentOffsetScaledLogVariance,
+		},
+		TimePropertiesDS: tp,
+	}
+	es := protocol.ExternalGrandmasterProperties{
+		GrandmasterIdentity: pds.GrandmasterIdentity,
+		StepsRemoved:        stepsRemoved + 1,
+	}
+
+	if err := pmc.RunPMCExpSetExternalGMPropertiesNP(e.LeadingClockData.controlledPortsConfig, es); err != nil {
+		glog.Error(err)
+	}
+	if err := pmc.RunPMCExpSetGMSettings(e.LeadingClockData.controlledPortsConfig, gs); err != nil {
+		glog.Error(err)
+	}
+	glog.Infof("%++v", es)
 }
 
 func (e *EventHandler) getGMState(cfgName string) clockSyncState {
@@ -735,6 +846,28 @@ func (e *EventHandler) freeRunCondition(cfgName string) bool {
 		}
 	}
 	return false
+}
+
+func (e *EventHandler) inSpecCondition(cfgName string) bool {
+	if e.LeadingClockData.MaxInSpecOffset == 0 {
+		glog.Info("Leading clock in-spec condition is pending initialization")
+		return false
+	}
+	if data, ok := e.data[cfgName]; ok {
+		for _, d := range data {
+			if d.ProcessName == DPLL {
+				for _, dd := range d.Details {
+					if dd.IFace == e.clkSyncState[cfgName].leadingIFace {
+						if math.Abs(float64(dd.Offset)) > float64(e.LeadingClockData.MaxInSpecOffset) {
+							glog.Infof("out-of-spec condition on DPLL ", dd.IFace)
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+	return true
 }
 
 func (e *EventHandler) getLeadingInterfaceBC() string {
@@ -1134,36 +1267,6 @@ func (e *EventHandler) updateClockClass(cfgName string, clkClass fbprotocol.Cloc
 			glog.Infof("No clock class identified for %d", clkClass)
 		}
 	default: // other than GM
-		switch clkClass {
-		case fbprotocol.ClockClass(135):
-			if g.ClockQuality.ClockClass != fbprotocol.ClockClass(135) {
-				g.ClockQuality.ClockClass = fbprotocol.ClockClass(135)
-				g.TimePropertiesDS.TimeTraceable = true
-				g.ClockQuality.ClockAccuracy = clkAccuracy
-				g.TimePropertiesDS.TimeSource = fbprotocol.TimeSourceInternalOscillator
-				g.ClockQuality.OffsetScaledLogVariance = 0xffff
-				err = gmSetterFn(cfgName, g)
-			}
-		case fbprotocol.ClockClass(165):
-			if g.ClockQuality.ClockClass != fbprotocol.ClockClass(165) {
-				g.ClockQuality.ClockClass = fbprotocol.ClockClass(165)
-				g.TimePropertiesDS.TimeTraceable = false
-				g.ClockQuality.ClockAccuracy = clkAccuracy
-				g.TimePropertiesDS.TimeSource = fbprotocol.TimeSourceInternalOscillator
-				g.ClockQuality.OffsetScaledLogVariance = 0xffff
-				err = gmSetterFn(cfgName, g)
-			}
-		case protocol.ClockClassFreerun:
-			if g.ClockQuality.ClockClass != protocol.ClockClassFreerun {
-				g.ClockQuality.ClockClass = protocol.ClockClassFreerun
-				g.TimePropertiesDS.TimeTraceable = false
-				g.ClockQuality.ClockAccuracy = fbprotocol.ClockAccuracyUnknown
-				g.TimePropertiesDS.TimeSource = fbprotocol.TimeSourceInternalOscillator
-				g.ClockQuality.OffsetScaledLogVariance = 0xffff
-				err = gmSetterFn(cfgName, g)
-			}
-		default:
-		}
 	}
 	return err, g.ClockQuality.ClockClass, g.ClockQuality.ClockAccuracy
 }
@@ -1400,6 +1503,10 @@ func (e *EventHandler) updateLeadingClockData(event EventChannel) {
 		if found {
 			e.LeadingClockData.upstreamParentDataSet = pds
 		}
+		cds, found := event.Values[CURRENT_DATA_SET].(*protocol.CurrentDS)
+		if found {
+			e.LeadingClockData.upstreamCurrentDSStepsRemoved = cds.StepsRemoved
+		}
 	case DPLL:
 		ls, found := event.Values[LEADING_SOURCE].(bool)
 		if found && ls {
@@ -1418,6 +1525,10 @@ func (e *EventHandler) updateLeadingClockData(event EventChannel) {
 		toFreeRunTh, found := event.Values[TO_FREERUN_THRESHOLD].(uint64)
 		if found {
 			e.LeadingClockData.toFreeRunThreshold = int(toFreeRunTh)
+		}
+		maxInSpec, found := event.Values[MAX_IN_SPEC_OFFSET].(uint64)
+		if found {
+			e.LeadingClockData.MaxInSpecOffset = maxInSpec
 		}
 	}
 }

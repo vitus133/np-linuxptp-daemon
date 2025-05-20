@@ -101,6 +101,7 @@ type DpllConfig struct {
 	frequencyTraceable     bool
 	state                  event.PTPState
 	onHoldover             bool
+	closing                bool
 	sourceLost             bool
 	processConfig          config.ProcessConfig
 	dependsOn              []event.EventSource
@@ -318,6 +319,7 @@ func NewDpll(clockId uint64, localMaxHoldoverOffSet, localHoldoverTimeout, maxIn
 		state:                    event.PTP_FREERUN,
 		iface:                    iface,
 		onHoldover:               false,
+		closing:                  false,
 		sourceLost:               false,
 		frequencyTraceable:       false,
 		dependsOn:                dependsOn,
@@ -554,13 +556,15 @@ func (d *DpllConfig) MonitorDpllNetlink() {
 			// unregister from event notification from other processes
 			d.unRegisterAllSubscriber()
 
+			d.stopDpll()
+			time.Sleep(time.Second)
 			if d.onHoldover {
 				close(d.holdoverCloseCh)
 				glog.Infof("closing holdover for %s", d.iface)
 				d.onHoldover = false
+				d.closing = true
 			}
 
-			d.stopDpll()
 			return
 
 		default:
@@ -705,7 +709,7 @@ func (d *DpllConfig) stateDecision() {
 					glog.Infof("closing holdover for %s since offset if above MaxHoldoverOffSet", d.iface)
 				default:
 				}
-			} else if !d.onHoldover {
+			} else if !d.onHoldover && !d.closing {
 				d.holdoverCloseCh = make(chan bool)
 				d.onHoldover = true
 				d.state = event.PTP_HOLDOVER
@@ -776,6 +780,7 @@ func (d *DpllConfig) sendDpllEvent() {
 			event.IN_SYNC_CONDITION_THRESHOLD: d.inSyncConditionThreshold,
 			event.IN_SYNC_CONDITION_TIMES:     d.inSyncConditionTimes,
 			event.TO_FREERUN_THRESHOLD:        d.LocalMaxHoldoverOffSet,
+			event.MAX_IN_SPEC_OFFSET:          d.MaxInSpecOffset,
 		},
 		ClockType:          d.processConfig.ClockType,
 		Time:               time.Now().UnixMilli(),
@@ -813,7 +818,6 @@ func (d *DpllConfig) MonitorDpllSysfs() {
 		case <-d.exitCh:
 			glog.Infof("Terminating sysfs DPLL monitoring")
 			d.sendDpllTerminationEvent()
-			time.Sleep(time.Second)
 			if d.onHoldover {
 				close(d.holdoverCloseCh) // Cancel any holdover
 			}

@@ -177,6 +177,7 @@ type ptpProcess struct {
 	nodeProfile               ptpv1.PtpProfile
 	ParentDataSet             *protocol.ParentDataSet
 	TimePropertiesDataSet     *protocol.TimePropertiesDS
+	CurrentDS                 *protocol.CurrentDS
 	pmcCheck                  bool
 	lastTransitionResult      event.PTPState
 	clockType                 event.ClockType
@@ -921,35 +922,55 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 			glog.Errorf("updateClockClass Recovered in f %#v", r)
 		}
 	}()
-
-	if r, e := pmc.RunPMCExpGetParentDS(p.configName); e == nil {
-		glog.Infof("%++v", r)
-		if p.ParentDataSet == nil {
-			p.ParentDataSet = &protocol.ParentDataSet{}
-		}
-		if r.GrandmasterClockClass != p.ParentDataSet.GrandmasterClockClass {
-			glog.Infof("clock change event identified: %d -> %d", p.ParentDataSet.GrandmasterClockClass, r.GrandmasterClockClass)
-			p.ParentDataSet = &r
-		}
-		//ptp4l[5196819.100]: [ptp4l.0.config] CLOCK_CLASS_CHANGE:248
-		// change to pint every minute or when the clock class changes
-		if c == nil {
-			UpdateClockClassMetrics(float64(p.ParentDataSet.GrandmasterClockClass)) // no socket then update metrics
-		} else {
-			clockClassOut := fmt.Sprintf("%s[%d]:[%s] CLOCK_CLASS_CHANGE %d\n", p.name, time.Now().Unix(), p.configName, p.ParentDataSet.GrandmasterClockClass)
-			_, err := (*c).Write([]byte(clockClassOut))
-			if err != nil {
-				glog.Errorf("failed to write class change event %s", err.Error())
+	trIfacePresent := false
+	profileClockType, pctFound := p.nodeProfile.PtpSettings["clockType"]
+	if pctFound && profileClockType == "T-BC" {
+		for _, iface := range p.ifaces {
+			if iface.Name == p.trIfaceName {
+				trIfacePresent = true
+				break
 			}
 		}
-	} else {
-		glog.Errorf("error parsing PMC util for clock class change event %s", e.Error())
 	}
-	err := p.getTimePropertiesDS()
-	if err != nil {
-		glog.Errorf("failed to get time properties DataSet %s", err.Error())
+	//either T-BC, or legacy configuration
+	if trIfacePresent {
+		if r, e := pmc.RunPMCExpGetParentDS(p.configName); e == nil {
+			glog.Infof("%++v", r)
+			if p.ParentDataSet == nil {
+				p.ParentDataSet = &protocol.ParentDataSet{}
+			}
+			if r.GrandmasterClockClass != p.ParentDataSet.GrandmasterClockClass {
+				glog.Infof("clock change event identified: %d -> %d", p.ParentDataSet.GrandmasterClockClass, r.GrandmasterClockClass)
+				p.ParentDataSet = &r
+			}
+			//ptp4l[5196819.100]: [ptp4l.0.config] CLOCK_CLASS_CHANGE:248
+			// change to pint every minute or when the clock class changes
+			if c == nil {
+				UpdateClockClassMetrics(float64(p.ParentDataSet.GrandmasterClockClass)) // no socket then update metrics
+			} else {
+				clockClassOut := fmt.Sprintf("%s[%d]:[%s] CLOCK_CLASS_CHANGE %d\n", p.name, time.Now().Unix(), p.configName, p.ParentDataSet.GrandmasterClockClass)
+				_, err := (*c).Write([]byte(clockClassOut))
+				if err != nil {
+					glog.Errorf("failed to write class change event %s", err.Error())
+				}
+			}
+		} else {
+			glog.Errorf("error parsing PMC util for clock class change event %s", e.Error())
+		}
 	}
-	p.sendPtp4lEvent()
+	// Only for T-BC
+	if trIfacePresent {
+		err := p.getTimePropertiesDS()
+		if err != nil {
+			glog.Errorf("failed to get time properties DataSet %s", err.Error())
+		}
+		err = p.getCurrentDS()
+		if err != nil {
+			glog.Errorf("failed to get Current DataSet %s", err.Error())
+		}
+		p.sendPtp4lEvent()
+		return
+	}
 }
 
 func (p *ptpProcess) getTimePropertiesDS() error {
@@ -958,6 +979,15 @@ func (p *ptpProcess) getTimePropertiesDS() error {
 		return err
 	}
 	p.TimePropertiesDataSet = &tp
+	return nil
+}
+
+func (p *ptpProcess) getCurrentDS() error {
+	cds, err := pmc.RunPMCExpGetCurrentDS(p.configName)
+	if err != nil {
+		return err
+	}
+	p.CurrentDS = &cds
 	return nil
 }
 
@@ -1591,6 +1621,7 @@ func (p *ptpProcess) sendPtp4lEvent() {
 			event.CONTROLLED_PORTS_CONFIG:  p.controlledPortsConfigFile,
 			event.PARENT_DATA_SET:          p.ParentDataSet,
 			event.TIME_PROPERTIES_DATA_SET: p.TimePropertiesDataSet,
+			event.CURRENT_DATA_SET:         p.CurrentDS,
 		},
 	}:
 	default:
