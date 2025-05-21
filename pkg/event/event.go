@@ -583,11 +583,14 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 			updateDownstreamData = true
 		} else {
 			// upstream data changed? If changed, update downstream data
-			if *e.LeadingClockData.upstreamParentDataSet != *e.LeadingClockData.downstreamParentDataSet ||
-				*e.LeadingClockData.upstreamTimeProperties != *e.LeadingClockData.downstreamTimeProperties {
-				e.LeadingClockData.downstreamParentDataSet = e.LeadingClockData.upstreamParentDataSet
-				e.LeadingClockData.downstreamTimeProperties = e.LeadingClockData.upstreamTimeProperties
-				updateDownstreamData = true
+			if e.LeadingClockData.upstreamParentDataSet != nil && e.LeadingClockData.upstreamTimeProperties != nil &&
+				e.LeadingClockData.downstreamParentDataSet != nil && e.LeadingClockData.downstreamTimeProperties != nil {
+				if *e.LeadingClockData.upstreamParentDataSet != *e.LeadingClockData.downstreamParentDataSet ||
+					*e.LeadingClockData.upstreamTimeProperties != *e.LeadingClockData.downstreamTimeProperties {
+					e.LeadingClockData.downstreamParentDataSet = e.LeadingClockData.upstreamParentDataSet
+					e.LeadingClockData.downstreamTimeProperties = e.LeadingClockData.upstreamTimeProperties
+					updateDownstreamData = true
+				}
 			}
 		}
 	case PTP_HOLDOVER:
