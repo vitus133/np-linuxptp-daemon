@@ -227,6 +227,7 @@ type LeadingClockParams struct {
 	toFreeRunThreshold              int
 	MaxInSpecOffset                 uint64
 	lastInSpec                      bool
+	inSyncThresholdCounter          int
 }
 
 // MockEnable ...
@@ -772,7 +773,15 @@ func (e *EventHandler) inSyncCondition(cfgName string) bool {
 		return false
 	}
 	worstDpllOffset := e.getLargestOffset(cfgName)
-	return math.Abs(float64(worstDpllOffset)) < float64(e.LeadingClockData.inSyncConditionThreshold)
+	if math.Abs(float64(worstDpllOffset)) < float64(e.LeadingClockData.inSyncConditionThreshold) {
+		e.LeadingClockData.inSyncThresholdCounter++
+		if e.LeadingClockData.inSyncThresholdCounter >= e.LeadingClockData.inSyncConditionTimes {
+			return true
+		} else {
+			e.LeadingClockData.inSyncThresholdCounter = 0
+		}
+	}
+	return false
 }
 
 func (e *EventHandler) isSourceLostBC(cfgName string) bool {
