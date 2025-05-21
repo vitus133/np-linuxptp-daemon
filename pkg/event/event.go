@@ -217,17 +217,16 @@ type LeadingClockParams struct {
 	upstreamParentDataSet         *protocol.ParentDataSet
 	upstreamCurrentDSStepsRemoved uint16
 	downstreamTimeProperties      *protocol.TimePropertiesDS
-	// downstreamParentDataSet         *protocol.ParentDataSet
-	downstreamCurrentDSStepsRemoved uint16
-	leadingInterface                string
-	leadingInterfaceConfig          string
-	controlledPortsConfig           string
-	inSyncConditionThreshold        int
-	inSyncConditionTimes            int
-	toFreeRunThreshold              int
-	MaxInSpecOffset                 uint64
-	lastInSpec                      bool
-	inSyncThresholdCounter          int
+	downstreamParentDataSet       *protocol.ParentDataSet
+	leadingInterface              string
+	leadingInterfaceConfig        string
+	controlledPortsConfig         string
+	inSyncConditionThreshold      int
+	inSyncConditionTimes          int
+	toFreeRunThreshold            int
+	MaxInSpecOffset               uint64
+	lastInSpec                    bool
+	inSyncThresholdCounter        int
 }
 
 // MockEnable ...
@@ -253,7 +252,10 @@ func Init(nodeName string, stdOutToSocket bool, socketName string, processChanne
 		outOfSpec:          false,
 		frequencyTraceable: false,
 		ReduceLog:          true,
-		LeadingClockData:   &LeadingClockParams{},
+		LeadingClockData: &LeadingClockParams{
+			downstreamTimeProperties: &protocol.TimePropertiesDS{},
+			downstreamParentDataSet:  &protocol.ParentDataSet{},
+		},
 	}
 	if clockClassMetric != nil {
 		clockClassMetric.With(prometheus.Labels{
@@ -514,7 +516,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	dpllState := PTP_NOTSET
 	ts2phcState := PTP_FREERUN
 	// For internal data announces, only update the downstream data on class change
-	// For External GM data announes in the locked state, update whenever any of the
+	// For External GM data announces in the locked state, update whenever any of the
 	// information elements change
 	updateDownstreamData := false
 
@@ -558,7 +560,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		e.clkSyncState[cfgName].clkLog = fmt.Sprintf("%s[%d]:[%s] %s T-BC-STATUS %s\n", BC, e.clkSyncState[cfgName].lastLoggedTime, cfgName, leadingInterface, e.clkSyncState[cfgName].state)
 		return *e.clkSyncState[cfgName]
 	}
-
+	glog.Info("current BC state: ", e.clkSyncState[cfgName].state)
 	switch e.clkSyncState[cfgName].state {
 	case PTP_NOTSET, PTP_FREERUN:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
@@ -579,6 +581,14 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 			glog.Info("BC FSM: LOCKED to HOLDOVER")
 			e.LeadingClockData.lastInSpec = true
 			updateDownstreamData = true
+		} else {
+			// upstream data changed? If changed, update downstream data
+			if *e.LeadingClockData.upstreamParentDataSet != *e.LeadingClockData.downstreamParentDataSet ||
+				*e.LeadingClockData.upstreamTimeProperties != *e.LeadingClockData.downstreamTimeProperties {
+				e.LeadingClockData.downstreamParentDataSet = e.LeadingClockData.upstreamParentDataSet
+				e.LeadingClockData.downstreamTimeProperties = e.LeadingClockData.upstreamTimeProperties
+				updateDownstreamData = true
+			}
 		}
 	case PTP_HOLDOVER:
 		if e.inSyncCondition(cfgName) && !e.isSourceLostBC(cfgName) {
@@ -726,7 +736,8 @@ func (e *EventHandler) downstreamAnnounceIWF(stepsRemoved uint16, pds protocol.P
 	}
 	es := protocol.ExternalGrandmasterProperties{
 		GrandmasterIdentity: pds.GrandmasterIdentity,
-		StepsRemoved:        stepsRemoved + 1,
+		// stepsRemoved at this point is already incremented, representing the current clock position
+		StepsRemoved: stepsRemoved,
 	}
 
 	if err := pmc.RunPMCExpSetExternalGMPropertiesNP(e.LeadingClockData.controlledPortsConfig, es); err != nil {
@@ -777,10 +788,13 @@ func (e *EventHandler) inSyncCondition(cfgName string) bool {
 		e.LeadingClockData.inSyncThresholdCounter++
 		if e.LeadingClockData.inSyncThresholdCounter >= e.LeadingClockData.inSyncConditionTimes {
 			return true
-		} else {
-			e.LeadingClockData.inSyncThresholdCounter = 0
 		}
+	} else {
+		e.LeadingClockData.inSyncThresholdCounter = 0
 	}
+
+	glog.Info("sync condition not reached: offset ", worstDpllOffset, " count ",
+		e.LeadingClockData.inSyncThresholdCounter, " out of ", e.LeadingClockData.inSyncConditionTimes)
 	return false
 }
 
