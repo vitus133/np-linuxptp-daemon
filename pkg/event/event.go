@@ -51,6 +51,7 @@ const (
 	CONTROLLED_PORTS_CONFIG     ValueType = "controlled-ports-config"
 	PARENT_DATA_SET             ValueType = "parent-ds"
 	CURRENT_DATA_SET            ValueType = "current-ds"
+	CLOCK_ID                    ValueType = "clock-id"
 	TIME_PROPERTIES_DATA_SET    ValueType = "time-props"
 	MAX_IN_SPEC_OFFSET          ValueType = "max-in-spec"
 	FaultyPhaseOffset                     = 99999999999
@@ -227,6 +228,7 @@ type LeadingClockParams struct {
 	MaxInSpecOffset               uint64
 	lastInSpec                    bool
 	inSyncThresholdCounter        int
+	clockId                       string
 }
 
 // MockEnable ...
@@ -676,7 +678,7 @@ func (e *EventHandler) announceLocalData(cfgName string) {
 	glog.Info("in announceLocalData")
 
 	egp := protocol.ExternalGrandmasterProperties{
-		GrandmasterIdentity: "507c6f.fffe.1fb218",
+		GrandmasterIdentity: e.LeadingClockData.clockId,
 		StepsRemoved:        0,
 	}
 	glog.Infof("EGP %++v", egp)
@@ -1532,6 +1534,10 @@ func (e *EventHandler) updateLeadingClockData(event EventChannel) {
 		cds, found := event.Values[CURRENT_DATA_SET].(*protocol.CurrentDS)
 		if found {
 			e.LeadingClockData.upstreamCurrentDSStepsRemoved = cds.StepsRemoved
+		}
+		id, found := event.Values[CLOCK_ID].(string)
+		if found {
+			e.LeadingClockData.clockId = id
 		}
 	case DPLL:
 		ls, found := event.Values[LEADING_SOURCE].(bool)

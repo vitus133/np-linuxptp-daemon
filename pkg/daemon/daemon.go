@@ -1414,7 +1414,7 @@ func removeMessageSuffix(input string) (output string) {
 	return output
 }
 
-// linuxptp 4.2 uses clock id ; this function will replace the clockid to interface name
+// linuxptp 4.2 uses ptp device id ; this function will replace the ptp device id by the interface name
 func (p *ptpProcess) replaceClockID(input string) (output string) {
 	if p.name != ts2phcProcessName {
 		return input
@@ -1600,7 +1600,39 @@ func containsAny(output string, indicators ...string) bool {
 	return false
 }
 
+func (p *ptpProcess) getPTPClockId() (string, error) {
+	leadingNic, found := p.nodeProfile.PtpSettings["leadingInterface"]
+	if !found {
+		return "", fmt.Errorf("leadingInterface not found in ptpProfile")
+	}
+	key := fmt.Sprintf("%s[%s]", dpll.ClockIdStr, leadingNic)
+	leadingClockId, found := p.nodeProfile.PtpSettings[key]
+	if !found {
+		return "", fmt.Errorf("leading interface ClockId not found in ptpProfile")
+	}
+	id, err := strconv.ParseUint(leadingClockId, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse clock ID string %s: %s", leadingClockId, err)
+	}
+	formatKey := fmt.Sprintf("%s[%s]", "clockIdFormat", leadingNic)
+	format, found := p.nodeProfile.PtpSettings[formatKey]
+	if found && format == "EUI-48" {
+		// MAC address format
+		return fmt.Sprintf("%x.fffe.%x",
+			id&0x0000ffffff000000>>24, id&0xffffff), nil
+	} else {
+		// Default format is EUE-64. For Intel WPC, it is EUI-64 alike, but not strictly compliant.
+		// So we will fix it
+		return fmt.Sprintf("%x.fffe.%x",
+			id&0xffffff0000000000>>40, id&0xffffff), nil
+	}
+}
+
 func (p *ptpProcess) sendPtp4lEvent() {
+	clockID, err := p.getPTPClockId()
+	if err != nil {
+		glog.Error(err)
+	}
 	select {
 	case p.eventCh <- event.EventChannel{
 		ProcessName: event.PTP4l,
@@ -1617,11 +1649,12 @@ func (p *ptpProcess) sendPtp4lEvent() {
 			return true
 		}(),
 		OutOfSpec: false,
-		Values: map[event.ValueType]interface{}{
+		Values: map[event.ValueType]any{
 			event.CONTROLLED_PORTS_CONFIG:  p.controlledPortsConfigFile,
 			event.PARENT_DATA_SET:          p.ParentDataSet,
 			event.TIME_PROPERTIES_DATA_SET: p.TimePropertiesDataSet,
 			event.CURRENT_DATA_SET:         p.CurrentDS,
+			event.CLOCK_ID:                 clockID,
 		},
 	}:
 	default:
