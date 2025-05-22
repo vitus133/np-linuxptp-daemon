@@ -1544,8 +1544,6 @@ func (e *EventHandler) updateLeadingClockData(event EventChannel) {
 		}
 		inSyncTimes, found := event.Values[IN_SYNC_CONDITION_TIMES].(uint64)
 		if found {
-			// TODO: implement counter of items below the thres
-			// hold and use it
 			e.LeadingClockData.inSyncConditionTimes = int(inSyncTimes)
 		}
 		toFreeRunTh, found := event.Values[TO_FREERUN_THRESHOLD].(uint64)

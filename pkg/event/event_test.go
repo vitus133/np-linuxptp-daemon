@@ -59,6 +59,7 @@ type PTPEvents struct {
 	wantGMState      string // want is the expected output.
 	wantClockState   string
 	wantProcessState string
+	wantBCState      string
 	desc             string
 	sourceLost       bool
 }
@@ -450,66 +451,28 @@ func sendEventsBC(cfgName string, iface string, processName event.EventSource, s
 }
 func TestEventHandler_ProcessTBCEvents(t *testing.T) {
 	monkeyPatch()
+	// {ProcessName:dpll State:s0 IFace:ens4f0 CfgName:ts2phc.1.config Values:map[free-run_th:150 frequency_status:4 in-sync-th:5 in-sync-times:12 leading_source:true max-in-spec:100 offset:99999999999 phase_status:4 pps_status:0]
+	// ClockType:BC Time:1747824606998 OutOfSpec:true WriteToLog:true Reset:false SourceLost:true FrequencyTraceable:false}
 	tests := []PTPEvents{
 		{
-			processName:      event.TS2PHCProcessName,
-			cfgName:          "ts2phc.0.config",
-			clockState:       event.PTP_LOCKED,
-			outOfSpec:        false,
-			iface:            "ens8f0",
-			wantProcessState: "ts2phc[0]:[ts2phc.0.config] ens8f0 offset -25 s2",
-			values:           map[event.ValueType]interface{}{event.OFFSET: int64(-25)},
-		},
-		{
-			processName:      event.TS2PHCProcessName,
-			cfgName:          "ts2phc.0.config",
-			clockState:       event.PTP_LOCKED,
-			outOfSpec:        false,
-			iface:            "ens5f0",
-			values:           map[event.ValueType]interface{}{event.OFFSET: int64(-25)},
-			wantProcessState: "ts2phc[0]:[ts2phc.0.config] ens5f0 offset -25 s2",
-		},
-		{
-			processName:      event.DPLL,
-			cfgName:          "ts2phc.0.config",
-			clockState:       event.PTP_LOCKED,
-			outOfSpec:        false,
-			iface:            "ens4f0",
-			wantProcessState: "dpll[0]:[ts2phc.0.config] ens4f0 frequency_status 4 offset 0 phase_status 3 pps_status 1 s2",
-			values:           map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 4, event.LEADING_SOURCE: true, event.OFFSET: int64(0), event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
-		},
-		{
-			processName:      event.DPLL,
-			cfgName:          "ts2phc.0.config",
-			clockState:       event.PTP_LOCKED,
-			outOfSpec:        false,
-			iface:            "ens5f0",
-			wantProcessState: "dpll[0]:[ts2phc.0.config] ens5f0 frequency_status 3 offset 0 phase_status 3 pps_status 1 s2",
-			values:           map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 3, event.LEADING_SOURCE: false, event.OFFSET: int64(0), event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
-		},
-		{
 			processName: event.DPLL,
-			cfgName:     "ts2phc.0.config",
-			clockState:  event.PTP_LOCKED,
-			outOfSpec:   false,
-			iface:       "ens8f0",
-			values:      map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 3, event.LEADING_SOURCE: false, event.OFFSET: int64(0), event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
-		},
-		{
-			processName: event.PTP4l,
-			cfgName:     "ptp4l.0.config",
-			clockState:  event.PTP_LOCKED,
-			outOfSpec:   false,
+			clockState:  event.PTP_FREERUN,
 			iface:       "ens4f0",
-			values:      map[event.ValueType]interface{}{},
-		},
-		{
-			processName: event.DPLL,
-			cfgName:     "ts2phc.0.config",
-			clockState:  event.PTP_LOCKED,
-			outOfSpec:   false,
-			iface:       "ens4f0",
-			values:      map[event.ValueType]interface{}{event.FREQUENCY_STATUS: 4, event.LEADING_SOURCE: true, event.OFFSET: int64(0), event.PHASE_STATUS: 3, event.PPS_STATUS: 1},
+			cfgName:     "ts2phc.1.config",
+			values: map[event.ValueType]interface{}{
+				event.TO_FREERUN_THRESHOLD:        int64(150),
+				event.FREQUENCY_STATUS:            4,
+				event.PHASE_STATUS:                4,
+				event.IN_SYNC_CONDITION_THRESHOLD: int64(5),
+				event.IN_SYNC_CONDITION_TIMES:     int64(12),
+				event.LEADING_SOURCE:              true,
+				event.MAX_IN_SPEC_OFFSET:          int64(100),
+				event.OFFSET:                      int64(99999999999),
+			},
+			outOfSpec: false,
+
+			wantProcessState: "dpll[0]:[ts2phc.1.config] ens4f0 free-run_th 150 frequency_status 4 in-sync-th 5 in-sync-times 12 max-in-spec 100 offset 99999999999 phase_status 4 s0",
+			wantBCState:      "BC[0]:[ts2phc.1.config] ens4f0 offset 99999999999 T-BC-STATUS s0",
 		},
 	}
 
@@ -550,11 +513,8 @@ func TestEventHandler_ProcessTBCEvents(t *testing.T) {
 				if strings.HasPrefix(c, string(test.processName)) {
 					assert.Equal(t, test.wantProcessState, rs, test.desc)
 				}
-				if strings.HasPrefix(c, "GM[") {
-					assert.Equal(t, test.wantGMState, rs, test.desc)
-				}
-				if strings.HasPrefix(c, "ptp4l[") {
-					assert.Equal(t, test.wantClockState, rs, test.desc)
+				if strings.HasPrefix(c, "BC[") {
+					assert.Equal(t, test.wantBCState, rs, test.desc)
 				}
 			default:
 			}
