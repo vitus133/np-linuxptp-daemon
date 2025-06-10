@@ -912,8 +912,9 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	trIfacePresent := false
 	profileClockType, pctFound := p.nodeProfile.PtpSettings["clockType"]
 	if !pctFound {
-		profileClockType = "unset"
-	} else if profileClockType == TBC {
+		profileClockType = string(event.ClockUnset)
+	}
+	if profileClockType == TBC {
 		for _, iface := range p.ifaces {
 			if iface.Name == p.trIfaceName {
 				trIfacePresent = true
@@ -995,6 +996,9 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 		glog.Infof("Failed parsing regex %s for %s: %d.  Defaulting to accept all", p.logFilterRegex, p.configName, regexErr)
 	}
 	profileClockType, pctFound := p.nodeProfile.PtpSettings["clockType"]
+	if !pctFound {
+		profileClockType = string(event.ClockUnset)
+	}
 	for {
 		glog.Infof("Starting %s...", p.name)
 		glog.Infof("%s cmd: %+v", p.name, p.cmd)
@@ -1025,7 +1029,7 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 							p.pmcCheck = false
 							go p.updateClockClass(nil)
 						}
-						if pctFound && profileClockType == TBC {
+						if profileClockType == TBC {
 							if strings.Contains(output, p.trIfaceName) {
 								if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
 									glog.Info("T-BC MOVE TO NORMAL")
@@ -1118,7 +1122,7 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 		}
 		p.updateGMStatusOnProcessDown(p.name)
 
-		if pctFound && profileClockType == TBC && p.name == ptp4lProcessName {
+		if profileClockType == TBC && p.name == ptp4lProcessName {
 			pm.AfterRunPTPCommand(&p.nodeProfile, "reset-to-default")
 		}
 		time.Sleep(connectionRetryInterval) // Delay to prevent flooding restarts if startup fails
