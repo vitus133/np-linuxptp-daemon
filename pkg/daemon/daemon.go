@@ -979,6 +979,23 @@ func (p *ptpProcess) getCurrentDS() error {
 	return nil
 }
 
+func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
+	if strings.Contains(output, p.trIfaceName) {
+		if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
+			glog.Info("T-BC MOVE TO NORMAL")
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+			p.lastTransitionResult = event.PTP_LOCKED
+			p.sendPtp4lEvent()
+		} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
+			strings.Contains(output, "SLAVE to") {
+			glog.Info("T-BC MOVE TO HOLDOVER")
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+			p.lastTransitionResult = event.PTP_FREERUN
+			p.sendPtp4lEvent()
+		}
+	}
+}
+
 // cmdRun runs given ptpProcess and restarts on errors
 func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 	done := make(chan struct{}) // Done setting up logging.  Go ahead and wait for process
@@ -1030,20 +1047,7 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 							go p.updateClockClass(nil)
 						}
 						if profileClockType == TBC {
-							if strings.Contains(output, p.trIfaceName) {
-								if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
-									glog.Info("T-BC MOVE TO NORMAL")
-									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-									p.lastTransitionResult = event.PTP_LOCKED
-									p.sendPtp4lEvent()
-								} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
-									strings.Contains(output, "SLAVE to") {
-									glog.Info("T-BC MOVE TO HOLDOVER")
-									pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-									p.lastTransitionResult = event.PTP_FREERUN
-									p.sendPtp4lEvent()
-								}
-							}
+							p.tBCTransitionCheck(output, pm)
 						}
 					} else if p.name == phc2sysProcessName && len(p.haProfile) > 0 {
 						p.announceHAFailOver(nil, output) // do not use go routine since order of execution is important here
@@ -1090,6 +1094,9 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *PluginManager) {
 					if p.name == ptp4lProcessName {
 						if strings.Contains(output, ClockClassChangeIndicator) {
 							go p.updateClockClass(p.c)
+						}
+						if profileClockType == TBC {
+							p.tBCTransitionCheck(output, pm)
 						}
 					} else if p.name == phc2sysProcessName && len(p.haProfile) > 0 {
 						p.announceHAFailOver(p.c, output) // do not use go routine since order of execution is important here
