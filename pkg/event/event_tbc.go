@@ -196,7 +196,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		if gSycState.state == PTP_LOCKED {
 			if e.LeadingClockData.upstreamParentDataSet != nil && e.LeadingClockData.upstreamTimeProperties != nil {
 				go e.downstreamAnnounceIWF(e.LeadingClockData.upstreamCurrentDSStepsRemoved,
-					*e.LeadingClockData.upstreamParentDataSet, *e.LeadingClockData.upstreamTimeProperties)
+					*e.LeadingClockData.upstreamParentDataSet, *e.LeadingClockData.upstreamTimeProperties, cfgName)
 			}
 		} else {
 			go e.announceLocalData(cfgName)
@@ -228,6 +228,7 @@ func (e *EventHandler) announceLocalData(cfgName string) {
 	}
 	glog.Infof("EGP %++v", egp)
 	go pmc.RunPMCExpSetExternalGMPropertiesNP(e.LeadingClockData.controlledPortsConfig, egp)
+	fmt.Printf("ptp4l %d %s CLOCK_CLASS_CHANGE %d\n", time.Now().Unix(), cfgName, e.clkSyncState[cfgName].clockClass)
 
 	gs := protocol.GrandmasterSettings{
 		ClockQuality: fbprotocol.ClockQuality{
@@ -274,7 +275,7 @@ func (e *EventHandler) announceLocalData(cfgName string) {
 	go pmc.RunPMCExpSetGMSettings(e.LeadingClockData.controlledPortsConfig, gs)
 }
 
-func (e *EventHandler) downstreamAnnounceIWF(stepsRemoved uint16, pds protocol.ParentDataSet, tp protocol.TimePropertiesDS) {
+func (e *EventHandler) downstreamAnnounceIWF(stepsRemoved uint16, pds protocol.ParentDataSet, tp protocol.TimePropertiesDS, cfgName string) {
 	gs := protocol.GrandmasterSettings{
 		ClockQuality: fbprotocol.ClockQuality{
 			ClockClass:              fbprotocol.ClockClass(pds.GrandmasterClockClass),
@@ -288,7 +289,7 @@ func (e *EventHandler) downstreamAnnounceIWF(stepsRemoved uint16, pds protocol.P
 		// stepsRemoved at this point is already incremented, representing the current clock position
 		StepsRemoved: stepsRemoved,
 	}
-
+	fmt.Printf("ptp4l %d %s CLOCK_CLASS_CHANGE %d\n", time.Now().Unix(), cfgName, gs.ClockQuality.ClockClass)
 	if err := pmc.RunPMCExpSetExternalGMPropertiesNP(e.LeadingClockData.controlledPortsConfig, es); err != nil {
 		glog.Error(err)
 	}
