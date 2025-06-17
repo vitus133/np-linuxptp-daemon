@@ -107,7 +107,7 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 		e.clkSyncState[cfgName].clockAccuracy = fbprotocol.ClockAccuracyUnknown
 		e.clkSyncState[cfgName].lastLoggedTime = time.Now().Unix()
 		e.clkSyncState[cfgName].leadingIFace = leadingInterface
-		e.clkSyncState[cfgName].clkLog = fmt.Sprintf("%s[%d]:[%s] %s T-BC-STATUS %s\n", BC, e.clkSyncState[cfgName].lastLoggedTime, cfgName, leadingInterface, e.clkSyncState[cfgName].state)
+		e.clkSyncState[cfgName].clkLog = fmt.Sprintf("T-BC[%d]:[%s] %s T-BC-STATUS %s\n", e.clkSyncState[cfgName].lastLoggedTime, cfgName, leadingInterface, e.clkSyncState[cfgName].state)
 		return *e.clkSyncState[cfgName]
 	}
 	glog.Info("current BC state: ", e.clkSyncState[cfgName].state)
@@ -205,8 +205,8 @@ func (e *EventHandler) updateBCState(event EventChannel) clockSyncState {
 	// this will reduce log noise and prints 1 per sec
 	logTime := time.Now().Unix()
 	if e.clkSyncState[cfgName].lastLoggedTime != logTime {
-		clkLog := fmt.Sprintf("%s[%d]:[%s] %s offset %d T-BC-STATUS %s\n",
-			BC, logTime, cfgName, gSycState.leadingIFace, e.clkSyncState[cfgName].clockOffset, gSycState.state)
+		clkLog := fmt.Sprintf("T-BC[%d]:[%s] %s offset %d T-BC-STATUS %s\n",
+			logTime, cfgName, gSycState.leadingIFace, e.clkSyncState[cfgName].clockOffset, gSycState.state)
 		e.clkSyncState[cfgName].lastLoggedTime = logTime
 		e.clkSyncState[cfgName].clkLog = clkLog
 		rclockSyncState.clkLog = clkLog

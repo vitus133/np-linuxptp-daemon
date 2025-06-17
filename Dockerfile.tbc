@@ -1,0 +1,20 @@
+# This is a temporary file for building the dev. preview of T-BC holdover
+FROM golang:1.23.5 AS builder
+WORKDIR /go/src/github.com/k8snetworkplumbingwg/linuxptp-daemon
+COPY . .
+RUN make clean && make
+
+FROM quay.io/centos/centos:stream9
+
+# COPY extra/linuxptp-4.2-2.el9_4.3.test72468.2.x86_64.rpm /
+COPY extra/linuxptp-4.2-2.el9_4.4.test_extgm.x86_64.rpm /
+RUN yum -y update && yum -y update glibc && yum --setopt=skip_missing_names_on_install=False -y install /linuxptp-4.2-2.el9_4.4.test_extgm.x86_64.rpm ethtool hwdata synce4l gpsd-minimal gpsd-minimal-clients && yum clean all && \
+	rm /linuxptp-4.2-2.el9_4.4.test_extgm.x86_64.rpm
+
+
+RUN ln -s /usr/bin/gpspipe /usr/local/bin/gpspipe && ln -s /usr/sbin/gpsd /usr/local/sbin/gpsd && ln -s /usr/bin/ubxtool /usr/local/bin/ubxtool
+
+
+COPY --from=builder /go/src/github.com/k8snetworkplumbingwg/linuxptp-daemon/bin/ptp /usr/local/bin/
+
+CMD ["/usr/local/bin/ptp"]
