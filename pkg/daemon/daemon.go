@@ -417,7 +417,9 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 		}
 		return cmp.Compare(*a.Name, *b.Name)
 	})
+
 	for _, profile := range dn.ptpUpdate.NodeProfiles {
+
 		err := dn.applyNodePtpProfile(runID, &profile)
 		if err != nil {
 			return err
@@ -463,6 +465,29 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	*dn.refreshNodePtpDevice = true
 	dn.readyTracker.setConfig(true)
 	return nil
+}
+
+func reconcileRelatedProfiles(profiles []ptpv1.PtpProfile) map[string]int {
+	dependentProfiles := map[string]string{}
+	dependentRunIds := map[string]int{}
+	// Reconcile related profiles
+	for _, profile := range profiles {
+		if profile.PtpSettings["controllingProfile"] != "" {
+			dependentProfiles[profile.PtpSettings["controllingProfile"]] = *profile.Name
+		}
+	}
+	for k, v := range dependentProfiles {
+		for controlledRunId, profile := range profiles {
+			if *profile.Name == v { // controlled
+				for _, profile := range profiles {
+					if *profile.Name == k { // controlling
+						dependentRunIds[k] = controlledRunId
+					}
+				}
+			}
+		}
+	}
+	return dependentRunIds
 }
 
 func getLogFilterRegex(nodeProfile *ptpv1.PtpProfile) string {
