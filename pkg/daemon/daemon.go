@@ -418,8 +418,12 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 		return cmp.Compare(*a.Name, *b.Name)
 	})
 
+	relations := reconcileRelatedProfiles(dn.ptpUpdate.NodeProfiles)
 	for _, profile := range dn.ptpUpdate.NodeProfiles {
 
+		if controlledId, ok := relations[*profile.Name]; ok {
+			profile.PtpSettings["controlledId"] = strconv.Itoa(controlledId)
+		}
 		err := dn.applyNodePtpProfile(runID, &profile)
 		if err != nil {
 			return err
@@ -583,15 +587,9 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		clockType = ptp4lOutput.clock_type
 	}
 
-	relatedSubProfile, found := (*nodeProfile).PtpSettings["relatedSubProfile"]
-	if found {
-		dn.relatedProfiles[*(*nodeProfile).Name] = relatedSubProfile
-		glog.Infof(" profile %s depends on current profile %s", relatedSubProfile, *(*nodeProfile).Name)
-	}
-	controllingProfile := (*nodeProfile).PtpSettings["controllingProfile"]
-
 	for _, p := range ptpProcesses {
 		pProcess = p
+		controlledConfigFile := ""
 		switch pProcess {
 		case ptp4lProcessName:
 			configInput = nodeProfile.Ptp4lConf
@@ -604,8 +602,9 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			configFile = fmt.Sprintf("ptp4l.%d.config", runID)
 			configPath = fmt.Sprintf("%s/%s", configPrefix, configFile)
 			messageTag = fmt.Sprintf("[ptp4l.%d.config:{level}]", runID)
-			if controllingProfile != "" {
-				dn.controlledPortsConfigFile = configFile
+			if controlledId, ok := nodeProfile.PtpSettings["controlledId"]; ok {
+				controlledConfigFile = fmt.Sprintf("ptp4l.%s.config", controlledId)
+
 			}
 
 		case phc2sysProcessName:
@@ -729,7 +728,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			ptpClockThreshold:         getPTPThreshold(nodeProfile),
 			haProfile:                 haProfile,
 			syncERelations:            relations,
-			controlledPortsConfigFile: dn.controlledPortsConfigFile,
+			controlledPortsConfigFile: controlledConfigFile,
 			lastTransitionResult:      event.PTP_NOTSET,
 		}
 
