@@ -163,34 +163,38 @@ func (p *ProcessManager) UpdateSynceConfig(config *synce.Relations) {
 
 }
 
-type ptpProcess struct {
-	name                      string
-	ifaces                    config.IFaces
-	processSocketPath         string
-	processConfigPath         string
-	configName                string
-	messageTag                string
-	eventCh                   chan event.EventChannel
-	exitCh                    chan bool
-	execMutex                 sync.Mutex
-	stopped                   bool
-	logFilterRegex            string
-	cmd                       *exec.Cmd
-	depProcess                []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
-	nodeProfile               ptpv1.PtpProfile
-	ParentDataSet             *protocol.ParentDataSet
-	TimePropertiesDataSet     *protocol.TimePropertiesDS
-	CurrentDS                 *protocol.CurrentDS
-	pmcCheck                  bool
-	lastTransitionResult      event.PTPState
-	clockType                 event.ClockType
-	ptpClockThreshold         *ptpv1.PtpClockThreshold
-	haProfile                 map[string][]string // stores list of interface name for each profile
-	syncERelations            *synce.Relations
-	c                         *net.Conn
-	hasCollectedMetrics       bool
-	trIfaceName               string // Time receiver interface name for T-BC clock monitoring
+type tBCProcessAttributes struct {
 	controlledPortsConfigFile string
+	trIfaceName               string // Time receiver interface name for T-BC clock monitoring
+}
+
+type ptpProcess struct {
+	name                  string
+	ifaces                config.IFaces
+	processSocketPath     string
+	processConfigPath     string
+	configName            string
+	messageTag            string
+	eventCh               chan event.EventChannel
+	exitCh                chan bool
+	execMutex             sync.Mutex
+	stopped               bool
+	logFilterRegex        string
+	cmd                   *exec.Cmd
+	depProcess            []process // these are list of dependent process which needs to be started/stopped if the parent process is starts/stops
+	nodeProfile           ptpv1.PtpProfile
+	ParentDataSet         *protocol.ParentDataSet
+	TimePropertiesDataSet *protocol.TimePropertiesDS
+	CurrentDS             *protocol.CurrentDS
+	pmcCheck              bool
+	lastTransitionResult  event.PTPState
+	clockType             event.ClockType
+	ptpClockThreshold     *ptpv1.PtpClockThreshold
+	haProfile             map[string][]string // stores list of interface name for each profile
+	syncERelations        *synce.Relations
+	c                     *net.Conn
+	hasCollectedMetrics   bool
+	tBCAttributes         tBCProcessAttributes
 }
 
 func (p *ptpProcess) Stopped() bool {
@@ -235,11 +239,6 @@ type Daemon struct {
 
 	// Allow vendors to include plugins
 	pluginManager PluginManager
-
-	// Allow relations between the profiles
-	// Main profile name is the key, dependent profile name - the value
-	relatedProfiles           map[string]string
-	controlledPortsConfigFile string
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance
@@ -282,7 +281,6 @@ func New(
 		processManager:       pm,
 		readyTracker:         tracker,
 		stopCh:               stopCh,
-		relatedProfiles:      make(map[string]string),
 	}
 }
 
@@ -712,28 +710,28 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		args := strings.Split(cmdLine, " ")
 		cmd = exec.Command(args[0], args[1:]...)
 		dprocess := ptpProcess{
-			name:                      p,
-			ifaces:                    ifaces,
-			processConfigPath:         configPath,
-			processSocketPath:         socketPath,
-			configName:                configFile,
-			messageTag:                messageTag,
-			exitCh:                    make(chan bool),
-			stopped:                   false,
-			logFilterRegex:            getLogFilterRegex(nodeProfile),
-			cmd:                       cmd,
-			depProcess:                []process{},
-			nodeProfile:               *nodeProfile,
-			clockType:                 clockType,
-			ptpClockThreshold:         getPTPThreshold(nodeProfile),
-			haProfile:                 haProfile,
-			syncERelations:            relations,
-			controlledPortsConfigFile: controlledConfigFile,
-			lastTransitionResult:      event.PTP_NOTSET,
+			name:                 p,
+			ifaces:               ifaces,
+			processConfigPath:    configPath,
+			processSocketPath:    socketPath,
+			configName:           configFile,
+			messageTag:           messageTag,
+			exitCh:               make(chan bool),
+			stopped:              false,
+			logFilterRegex:       getLogFilterRegex(nodeProfile),
+			cmd:                  cmd,
+			depProcess:           []process{},
+			nodeProfile:          *nodeProfile,
+			clockType:            clockType,
+			ptpClockThreshold:    getPTPThreshold(nodeProfile),
+			haProfile:            haProfile,
+			syncERelations:       relations,
+			tBCAttributes:        tBCProcessAttributes{controlledPortsConfigFile: controlledConfigFile},
+			lastTransitionResult: event.PTP_NOTSET,
 		}
 
 		if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
-			dprocess.trIfaceName = port
+			dprocess.tBCAttributes.trIfaceName = port
 		}
 
 		// TODO HARDWARE PLUGIN for e810
@@ -940,7 +938,7 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	}
 	if profileClockType == TBC {
 		for _, iface := range p.ifaces {
-			if iface.Name == p.trIfaceName {
+			if iface.Name == p.tBCAttributes.trIfaceName {
 				trIfacePresent = true
 				break
 			}
@@ -1004,7 +1002,7 @@ func (p *ptpProcess) getCurrentDS() error {
 }
 
 func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
-	if strings.Contains(output, p.trIfaceName) {
+	if strings.Contains(output, p.tBCAttributes.trIfaceName) {
 		if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
 			glog.Info("T-BC MOVE TO NORMAL")
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
@@ -1658,14 +1656,14 @@ func (p *ptpProcess) sendPtp4lEvent() {
 		ProcessName: event.PTP4l,
 		State:       p.lastTransitionResult,
 		CfgName:     p.configName,
-		IFace:       p.trIfaceName,
+		IFace:       p.tBCAttributes.trIfaceName,
 		ClockType:   p.clockType,
 		Time:        time.Now().UnixMilli(),
 		Reset:       false,
 		SourceLost:  p.lastTransitionResult != event.PTP_LOCKED,
 		OutOfSpec:   false,
 		Values: map[event.ValueType]any{
-			event.ControlledPortsConfig: p.controlledPortsConfigFile,
+			event.ControlledPortsConfig: p.tBCAttributes.controlledPortsConfigFile,
 			event.ParentDataSet:         p.ParentDataSet,
 			event.TimePropertiesDataSet: p.TimePropertiesDataSet,
 			event.CurrentDataSet:        p.CurrentDS,

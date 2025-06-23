@@ -4,7 +4,6 @@ ptpSettings:
   clockId[ens4f0]: 5799633565432596414
   clockId[ens5f0]: 5799633565433967128
   clockId[ens8f0]: 5799633565432596448
-  relatedSubProfile: 00-tbc-tt
   inSyncConditionThreshold: 10
   inSyncConditionTimes: 2
 phc2sysOpts: -r -n 24 -N 8 -u 0 -s ens4f0
