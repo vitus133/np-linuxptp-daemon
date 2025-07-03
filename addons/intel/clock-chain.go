@@ -31,8 +31,8 @@ const (
 	ClockTypeUnset ClockChainType = iota
 	ClockTypeTGM
 	ClockTypeTBC
-	PrioEnable  = 0
-	PrioDisable = 255
+	PriorityEnabled  = 0
+	PriorityDisabled = 255
 )
 
 var ClockTypesMap = map[string]ClockChainType{
@@ -47,21 +47,27 @@ const (
 	sdp22          = "CVL-SDP22"
 	sdp23          = "CVL-SDP23"
 	gnss           = "GNSS-1PPS"
+	sma1Input      = "SMA1"
+	sma2Input      = "SMA2/U.FL2"
+	c827_0_rclka   = "C827_0-RCLKA"
+	c827_0_rclkb   = "C827_0-RCLKB"
 	eecDpllIndex   = 0
 	ppsDpllIndex   = 1
 	sdp22PpsEnable = "2 0 0 1 0"
 )
 
 type PinParentControl struct {
-	EecEnabled bool
-	PpsEnabled bool
+	EecPriority    uint8
+	PpsPriority    uint8
+	EecOutputState uint8
+	PpsOutputState uint8
 }
 type PinControl struct {
 	Label         string
 	ParentControl PinParentControl
 }
 
-var internalPinLabels = []string{sdp20, sdp21, sdp22, sdp23, gnss}
+var configurablePins = []string{sdp20, sdp21, sdp22, sdp23, gnss, sma1Input, sma2Input, c827_0_rclka, c827_0_rclkb}
 
 func (ch *ClockChain) GetLiveDpllPinsInfo() error {
 	if !unitTest {
@@ -69,6 +75,7 @@ func (ch *ClockChain) GetLiveDpllPinsInfo() error {
 		if err != nil {
 			return fmt.Errorf("failed to dial DPLL: %v", err)
 		}
+		//nolint:errcheck
 		defer conn.Close()
 		ch.DpllPins, err = conn.DumpPinGet()
 		if err != nil {
@@ -194,7 +201,7 @@ func InitClockChain(e810Opts E810Opts, nodeProfile *ptpv1.PtpProfile) (*ClockCha
 		}
 	} else {
 		(*nodeProfile).PtpSettings["clockType"] = "T-GM"
-		glog.Info("about to init TGM pins")
+		glog.Info("about to set DPLL pin defaults")
 		_, err = chain.SetPinDefaults()
 	}
 	return chain, err
@@ -206,7 +213,7 @@ func (ch *ClockChain) GetLeadingCardSDP() error {
 		return err
 	}
 	for _, pin := range ch.DpllPins {
-		if pin.ClockId == clockId && slices.Contains(internalPinLabels, pin.BoardLabel) {
+		if pin.ClockId == clockId && slices.Contains(configurablePins, pin.BoardLabel) {
 			ch.LeadingNIC.Pins[pin.BoardLabel] = *pin
 		}
 	}
@@ -240,37 +247,24 @@ func SetPinControlData(pin dpll.PinInfo, control PinParentControl) *dpll.PinPare
 		Id:           pin.Id,
 		PinParentCtl: make([]dpll.PinControl, 0),
 	}
-	var enable bool
+
 	for deviceIndex, parentDevice := range pin.ParentDevice {
+		var prio uint32
+		var outputState uint32
 		pc := dpll.PinControl{}
 		pc.PinParentId = parentDevice.ParentId
 		switch deviceIndex {
 		case eecDpllIndex:
-			enable = control.EecEnabled
+			prio = uint32(control.EecPriority)
+			outputState = uint32(control.EecOutputState)
 		case ppsDpllIndex:
-			enable = control.PpsEnabled
+			prio = uint32(control.PpsPriority)
+			outputState = uint32(control.PpsOutputState)
 		}
-
 		if parentDevice.Direction == dpll.DPLL_PIN_DIRECTION_INPUT {
-			pc.Prio = func(enabled bool) *uint32 {
-				var p uint32
-				if enabled {
-					p = PrioEnable
-				} else {
-					p = PrioDisable
-				}
-				return &p
-			}(enable)
+			pc.Prio = &prio
 		} else {
-			pc.State = func(enabled bool) *uint32 {
-				var s uint32
-				if enabled {
-					s = dpll.DPLL_PIN_STATE_CONNECTED
-				} else {
-					s = dpll.DPLL_PIN_STATE_DISCONNECTED
-				}
-				return &s
-			}(enable)
+			pc.State = &outputState
 		}
 		Pin.PinParentCtl = append(Pin.PinParentCtl, pc)
 	}
@@ -313,22 +307,22 @@ func (c *ClockChain) InitPinsTBC() (*[]dpll.PinParentDeviceCtl, error) {
 		{
 			Label: gnss,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecPriority: PriorityDisabled,
+				PpsPriority: PriorityDisabled,
 			},
 		},
 		{
 			Label: sdp20,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecPriority: PriorityDisabled,
+				PpsPriority: PriorityDisabled,
 			},
 		},
 		{
 			Label: sdp21,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
+				PpsOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
 			},
 		},
 	})
@@ -346,15 +340,15 @@ func (c *ClockChain) EnterHoldoverTBC() (*[]dpll.PinParentDeviceCtl, error) {
 		{
 			Label: sdp22,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecPriority: PriorityDisabled,
+				PpsPriority: PriorityDisabled,
 			},
 		},
 		{
 			Label: sdp23,
 			ParentControl: PinParentControl{
-				EecEnabled: true,
-				PpsEnabled: true,
+				EecOutputState: dpll.DPLL_PIN_STATE_CONNECTED,
+				PpsOutputState: dpll.DPLL_PIN_STATE_CONNECTED,
 			},
 		},
 	})
@@ -372,15 +366,15 @@ func (c *ClockChain) EnterNormalTBC() (*[]dpll.PinParentDeviceCtl, error) {
 		{
 			Label: sdp22,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: true,
+				EecPriority: PriorityDisabled,
+				PpsPriority: PriorityEnabled,
 			},
 		},
 		{
 			Label: sdp23,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
+				PpsOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
 			},
 		},
 	})
@@ -412,36 +406,64 @@ func (c *ClockChain) SetPinDefaults() (*[]dpll.PinParentDeviceCtl, error) {
 		{
 			Label: gnss,
 			ParentControl: PinParentControl{
-				EecEnabled: true,
-				PpsEnabled: true,
+				EecPriority: 0,
+				PpsPriority: 0,
+			},
+		},
+		{
+			Label: sma1Input,
+			ParentControl: PinParentControl{
+				EecPriority: 3,
+				PpsPriority: 3,
+			},
+		},
+		{
+			Label: sma2Input,
+			ParentControl: PinParentControl{
+				EecPriority: 2,
+				PpsPriority: 2,
 			},
 		},
 		{
 			Label: sdp20,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecPriority: PriorityDisabled,
+				PpsPriority: 4,
 			},
 		},
 		{
 			Label: sdp22,
 			ParentControl: PinParentControl{
-				EecEnabled: false,
-				PpsEnabled: false,
+				EecPriority: PriorityDisabled,
+				PpsPriority: 5,
 			},
 		},
 		{
 			Label: sdp21,
 			ParentControl: PinParentControl{
-				EecEnabled: true,
-				PpsEnabled: true,
+				EecOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
+				PpsOutputState: dpll.DPLL_PIN_STATE_CONNECTED,
 			},
 		},
 		{
 			Label: sdp23,
 			ParentControl: PinParentControl{
-				EecEnabled: true,
-				PpsEnabled: true,
+				EecOutputState: dpll.DPLL_PIN_STATE_DISCONNECTED,
+				PpsOutputState: dpll.DPLL_PIN_STATE_CONNECTED,
+			},
+		},
+		{
+			Label: c827_0_rclka,
+			ParentControl: PinParentControl{
+				EecPriority: 8,
+				PpsPriority: 8,
+			},
+		},
+		{
+			Label: c827_0_rclkb,
+			ParentControl: PinParentControl{
+				EecPriority: 9,
+				PpsPriority: 9,
 			},
 		},
 	})
@@ -459,6 +481,7 @@ func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 	if err != nil {
 		return fmt.Errorf("failed to dial DPLL: %v", err)
 	}
+	//nolint:errcheck
 	defer conn.Close()
 	for _, command := range *commands {
 		glog.Infof("DPLL pin command %++v", command)
