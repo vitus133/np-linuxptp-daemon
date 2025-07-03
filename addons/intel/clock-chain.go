@@ -195,7 +195,7 @@ func InitClockChain(e810Opts E810Opts, nodeProfile *ptpv1.PtpProfile) (*ClockCha
 	} else {
 		(*nodeProfile).PtpSettings["clockType"] = "T-GM"
 		glog.Info("about to init TGM pins")
-		_, err = chain.InitPinsTGM()
+		_, err = chain.SetPinDefaults()
 	}
 	return chain, err
 }
@@ -390,10 +390,24 @@ func (c *ClockChain) EnterNormalTBC() (*[]dpll.PinParentDeviceCtl, error) {
 	return commands, BatchPinSet(commands)
 }
 
-func (c *ClockChain) InitPinsTGM() (*[]dpll.PinParentDeviceCtl, error) {
-	// Set GNSS-1PPS priority to 0 (max priority)
-	// Disable DPLL inputs from e810 (SDP20, SDP22)
-	// Enable DPLL Outputs to e810 (SDP21, SDP23)
+func (c *ClockChain) SetPinDefaults() (*[]dpll.PinParentDeviceCtl, error) {
+	// DPLL Priority List:
+	//
+	//	Recommended | Pin Index | EEC-DPLL0                    | PPS-DPLL1
+	//	Priority    |           | (Frequency/Glitchless)       | (Phase/Glitch Allowed)
+	//	------------|-----------|------------------------------|-----------------------------
+	//	0           | 6         | 1PPS from GNSS (GNSS-1PPS)  | 1PPS from GNSS (GNSS-1PPS)
+	//	2           | 5         | 1PPS from SMA2 (SMA2)       | 1PPS from SMA2 (SMA2)
+	//	3           | 4         | 1PPS from SMA1 (SMA1)       | 1PPS from SMA1 (SMA1)
+	//	4           | 1         | Reserved                     | 1PPS from E810 (CVL-SDP20)
+	//	5           | 0         | Reserved                     | 1PPS from E810 (CVL-SDP22)
+	//	6           | --        | Reserved                     | Reserved
+	//	7           | --        | Reserved                     | Reserved
+	//	8           | 2         | Recovered CLK1 (C827_0-RCLKA) | Recovered CLK1 (C827_0-RCLKA)
+	//	9           | 3         | Recovered CLK2 (C827_0-RCLKB) | Recovered CLK2 (C827_0-RCLKB)
+	//	10          | --        | OCXO                         | OCXO
+
+	// Also, Enable DPLL Outputs to e810 (SDP21, SDP23)
 	commands, err := c.SetPinsControl([]PinControl{
 		{
 			Label: gnss,
@@ -471,3 +485,14 @@ func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 	}
 	return nil
 }
+
+// DPLL Priority Configuration:
+//
+//	HW Default | Recommended | Pin Index | EEC-DPLL0 Source           | Frequency  | PPS-DPLL1 Source           | Frequency
+//	-----------|-------------|-----------|----------------------------|------------|----------------------------|----------
+//	0          | 0           | 6         | 1PPS from GNSS (GNSS-1PPS)| 1PPS       | 1PPS from GNSS (GNSS-1PPS)| 1PPS
+//	2          | 2           | 5         | 1PPS from SMA2 (SMA2)      | 1PPS       | 1PPS from SMA2 (SMA2)      | 1PPS
+//	1          | 3           | 4         | 1PPS from SMA1 (SMA1)      | 1PPS       | 1PPS from SMA1 (SMA1)      | 1PPS
+//	3          | 4           | 1         | Reserved                   | --         | 1PPS from E810 (CVL-SDP20)| 10 MHz
+//	8          | 5           | 0         | Reserved                   | --         | 1PPS from E810 (CVL-SDP22)| 1PPS
+//	...

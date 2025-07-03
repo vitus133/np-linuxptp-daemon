@@ -255,7 +255,7 @@ func AfterRunPTPCommandE810(data *interface{}, nodeProfile *ptpv1.PtpProfile, co
 				}
 				glog.Info("e810: enter T-BC holdover")
 			case "reset-to-default":
-				_, err = clockChain.InitPinsTGM()
+				_, err = clockChain.SetPinDefaults()
 				if err != nil {
 					return fmt.Errorf("e810: failed to reset pins to default")
 				}
