@@ -261,9 +261,9 @@ func main() {
 			}
 
 			// Trigger reconciliation for any existing PtpConfigs
-			_, err := ptpConfigReconciler.Reconcile(context.Background(), ctrl.Request{})
-			if err != nil {
-				glog.Errorf("Initial reconciliation failed: %v", err)
+			_, err1 := ptpConfigReconciler.Reconcile(context.Background(), ctrl.Request{})
+			if err1 != nil {
+				glog.Errorf("Initial reconciliation failed: %v", err1)
 			}
 		}()
 
@@ -299,12 +299,12 @@ func main() {
 				}
 
 				nodeProfile := filepath.Join(cp.profileDir, nodeName)
-				if _, err := os.Stat(nodeProfile); err != nil {
-					glog.Errorf("error stating node profile %v: %v", nodeName, err)
+				if _, err1 := os.Stat(nodeProfile); err1 != nil {
+					glog.Errorf("error stating node profile %v: %v", nodeName, err1)
 					continue
 				}
-				nodeProfilesJSON, err := os.ReadFile(nodeProfile)
-				if err != nil {
+				nodeProfilesJSON, err1 := os.ReadFile(nodeProfile)
+				if err1 != nil {
 					glog.Errorf("error reading node profile: %v", nodeProfile)
 					continue
 				}

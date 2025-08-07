@@ -76,10 +76,10 @@ func (r *PtpConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctrl.Res
 
 	// Convert profiles to JSON and update the daemon configuration
 	if len(matchingProfiles) > 0 {
-		nodeProfilesJSON, err := json.Marshal(matchingProfiles)
-		if err != nil {
+		nodeProfilesJSON, err1 := json.Marshal(matchingProfiles)
+		if err1 != nil {
 			log.Error(err, "Failed to marshal node profiles")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, err1
 		}
 
 		glog.Infof("Updating daemon configuration with %d profiles for node %s", len(matchingProfiles), r.NodeName)
