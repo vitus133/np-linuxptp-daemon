@@ -187,25 +187,25 @@ func main() {
 		glog.Info("Setting up controller manager for PtpConfig resources")
 
 		// Create manager
-		var err error
-		mgr, err = ctrl.NewManager(cfg, ctrl.Options{
+		var err1 error
+		mgr, err1 = ctrl.NewManager(cfg, ctrl.Options{
 			Scheme:                 scheme,
 			HealthProbeBindAddress: ":8082",
 			LeaderElection:         false, // Disable leader election for daemon
 			// PtpConfig is cluster-scoped, so don't restrict cache by namespace
 		})
-		if err != nil {
-			glog.Errorf("unable to start controller manager: %v", err)
+		if err1 != nil {
+			glog.Errorf("unable to start controller manager: %v", err1)
 			return
 		}
 
 		// Add health checks
-		if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-			glog.Errorf("unable to set up health check: %v", err)
+		if err1 = mgr.AddHealthzCheck("healthz", healthz.Ping); err1 != nil {
+			glog.Errorf("unable to set up health check: %v", err1)
 			return
 		}
-		if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-			glog.Errorf("unable to set up ready check: %v", err)
+		if err1 = mgr.AddReadyzCheck("readyz", healthz.Ping); err1 != nil {
+			glog.Errorf("unable to set up ready check: %v", err1)
 			return
 		}
 
@@ -217,8 +217,8 @@ func main() {
 			ConfigUpdate: ptpConfUpdate,
 		}
 
-		if err = ptpConfigReconciler.SetupWithManager(mgr); err != nil {
-			glog.Errorf("unable to create controller for PtpConfig: %v", err)
+		if err1 = ptpConfigReconciler.SetupWithManager(mgr); err1 != nil {
+			glog.Errorf("unable to create controller for PtpConfig: %v", err1)
 			return
 		}
 
@@ -226,8 +226,8 @@ func main() {
 		mgrCtx, mgrCancel = context.WithCancel(context.Background())
 		go func() {
 			glog.Info("Starting controller manager")
-			if err := mgr.Start(mgrCtx); err != nil {
-				glog.Errorf("problem running controller manager: %v", err)
+			if err1 = mgr.Start(mgrCtx); err1 != nil {
+				glog.Errorf("problem running controller manager: %v", err1)
 			}
 		}()
 
@@ -300,21 +300,16 @@ func main() {
 
 				nodeProfile := filepath.Join(cp.profileDir, nodeName)
 				if _, err := os.Stat(nodeProfile); err != nil {
-					if os.IsNotExist(err) {
-						glog.Infof("ptp profile doesn't exist for node: %v", nodeName)
-						continue
-					} else {
-						glog.Errorf("error stating node profile %v: %v", nodeName, err)
-						continue
-					}
+					glog.Errorf("error stating node profile %v: %v", nodeName, err)
+					continue
 				}
-				nodeProfilesJson, err := os.ReadFile(nodeProfile)
+				nodeProfilesJSON, err := os.ReadFile(nodeProfile)
 				if err != nil {
 					glog.Errorf("error reading node profile: %v", nodeProfile)
 					continue
 				}
 
-				err = ptpConfUpdate.UpdateConfig(nodeProfilesJson)
+				err = ptpConfUpdate.UpdateConfig(nodeProfilesJSON)
 				if err != nil {
 					glog.Errorf("error updating the node configuration using the profiles loaded: %v", err)
 				}
