@@ -4,9 +4,9 @@ This document describes how to use the LinuxPTP daemon with Kubernetes controlle
 
 ## Overview
 
-The LinuxPTP daemon now supports two modes of operation:
+The LinuxPTP daemon now supports two modes of operation (controller mode is disabled by default; enable with `--use-controller=true`):
 
-1. **Controller Mode** (default): Watches `PtpConfig` custom resources and automatically applies matching configurations
+1. **Controller Mode**: Watches `PtpConfig` custom resources and automatically applies matching configurations
 2. **Legacy File Mode**: Reads configuration from mounted ConfigMaps (backward compatibility)
 
 ## Controller Mode
@@ -108,7 +108,7 @@ rules:
 
 ## Command Line Options
 
-- `--use-controller=true/false`: Enable/disable controller mode (default: true)
+- `--use-controller=true/false`: Enable/disable controller mode (default: false)
 - `--update-interval=30`: Status update interval in seconds
 - `--pmc-poll-interval=2`: PMC polling interval in seconds
 
@@ -160,7 +160,7 @@ To migrate from file-based configuration:
 1. Deploy new RBAC permissions
 2. Create equivalent `PtpConfig` resources
 3. Update daemon deployment to remove ConfigMap volumes  
-4. Set `--use-controller=true` (or remove flag, it's default)
+4. Set `--use-controller=true`
 5. Remove old ConfigMaps after verification
 
 ## Legacy File Mode

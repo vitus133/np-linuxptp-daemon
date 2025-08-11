@@ -67,8 +67,8 @@ func main() {
 
 	fmt.Printf("Git commit: %s\n", GitCommit)
 	cp := &cliParams{}
-	flag.Parse()
 	flagInit(cp)
+	flag.Parse()
 
 	glog.Infof("resync period set to: %d [s]", cp.updateInterval)
 	glog.Infof("linuxptp profile path set to: %s", cp.profileDir)
