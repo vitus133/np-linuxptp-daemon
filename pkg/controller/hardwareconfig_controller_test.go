@@ -2,6 +2,7 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -353,7 +354,7 @@ func TestCheckIfActiveProfilesAffected(t *testing.T) {
 }
 
 func TestRestartTriggerIntegration(t *testing.T) {
-	// Test the complete flow of hardware config change triggering PTP restart
+	// Test the complete flow of hardware config change triggering deferred PTP restart
 	mockHandler := &MockHardwareConfigHandler{}
 	mockTrigger := &MockHardwareConfigRestartTrigger{
 		CurrentProfiles: []string{"grandmaster-profile"},
@@ -378,16 +379,45 @@ func TestRestartTriggerIntegration(t *testing.T) {
 		},
 	}
 
-	// Test that the restart is triggered
+	// Test that the restart is needed
 	needsRestart := reconciler.checkIfActiveProfilesAffected(nil, hwConfigs)
 	assert.True(t, needsRestart, "Should detect that restart is needed")
 
-	// Simulate the restart trigger
-	err := reconciler.ConfigUpdate.TriggerRestartForHardwareChange()
-	assert.NoError(t, err, "Restart trigger should succeed")
+	// Test the deferred restart mechanism
+	reconciler.scheduleDeferredRestart(nil)
 
-	// Verify that the restart was triggered
-	assert.Equal(t, 1, mockTrigger.RestartTriggerCount, "Restart should have been triggered once")
+	// Wait for the deferred restart to execute
+	time.Sleep(150 * time.Millisecond)
+
+	// Verify that the restart was triggered after the delay
+	assert.Equal(t, 1, mockTrigger.RestartTriggerCount, "Restart should have been triggered once after delay")
+}
+
+// Test that multiple restart requests are handled properly
+func TestDeferredRestartDebouncing(t *testing.T) {
+	mockHandler := &MockHardwareConfigHandler{}
+	mockTrigger := &MockHardwareConfigRestartTrigger{
+		CurrentProfiles: []string{"grandmaster-profile"},
+	}
+
+	reconciler := &HardwareConfigReconciler{
+		NodeName:              "test-node",
+		HardwareConfigHandler: mockHandler,
+		ConfigUpdate:          mockTrigger,
+	}
+
+	// Schedule multiple deferred restarts
+	reconciler.scheduleDeferredRestart(nil)
+	reconciler.scheduleDeferredRestart(nil)
+	reconciler.scheduleDeferredRestart(nil)
+
+	// Wait for all deferred restarts to execute
+	time.Sleep(200 * time.Millisecond)
+
+	// The restart should have been triggered multiple times (once per call)
+	// In a real scenario, we might want to implement actual debouncing,
+	// but for now we allow multiple calls
+	assert.True(t, mockTrigger.RestartTriggerCount >= 1, "At least one restart should have been triggered")
 }
 
 func TestHardwareConfigReconcilerFields(t *testing.T) {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -82,17 +83,9 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 	needsPTPRestart := r.checkIfActiveProfilesAffected(ctx, hwConfigList.Items)
 
 	if needsPTPRestart {
-		glog.Infof("HardwareConfig change affects active PTP profiles on node %s, triggering PTP restart", r.NodeName)
-		if r.ConfigUpdate != nil {
-			err := r.ConfigUpdate.TriggerRestartForHardwareChange()
-			if err != nil {
-				log.Error(err, "Failed to trigger PTP restart for hardware configuration change")
-				return ctrl.Result{}, err
-			}
-			log.Info("Successfully triggered PTP restart due to hardware configuration change")
-			// When PTP restarts, it will pick up the new hardware configurations automatically
-			return ctrl.Result{}, nil
-		}
+		glog.Infof("HardwareConfig change affects active PTP profiles on node %s, will trigger PTP restart after reconciling all configs", r.NodeName)
+		// Don't trigger restart immediately - wait for all configs to be reconciled first
+		r.scheduleDeferredRestart(ctx)
 	}
 
 	// Calculate the applicable hardware configurations for this node
@@ -130,6 +123,27 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// scheduleDeferredRestart schedules a restart to happen after a short delay
+// This allows all HardwareConfig reconciliations to complete before triggering the restart
+func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) {
+	log := log.FromContext(ctx)
+
+	// Use a goroutine with a short delay to allow all reconciliations to complete
+	go func() {
+		// Wait a short time for all reconciliations to complete
+		time.Sleep(100 * time.Millisecond)
+
+		if r.ConfigUpdate != nil {
+			err := r.ConfigUpdate.TriggerRestartForHardwareChange()
+			if err != nil {
+				log.Error(err, "Failed to trigger deferred PTP restart for hardware configuration change")
+			} else {
+				log.Info("Successfully triggered deferred PTP restart due to hardware configuration change")
+			}
+		}
+	}()
 }
 
 // calculateNodeHardwareConfigs determines which hardware configurations should be applied to this node

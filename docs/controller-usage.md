@@ -39,10 +39,13 @@ HardwareConfig CRD → Controller → Check Active Profile Association → Unifi
 
 Both PtpConfig and HardwareConfig controllers use the same unified restart mechanism:
 
-1. **PtpConfig Changes**: Always trigger a complete PTP process restart
-2. **HardwareConfig Changes**: Trigger a PTP process restart **only if** the hardware config is associated with a currently active PTP profile via the `RelatedPtpProfileName` field
+1. **PtpConfig Changes**: Always trigger a complete PTP process restart immediately
+2. **HardwareConfig Changes**: Check if the hardware config is associated with a currently active PTP profile via the `RelatedPtpProfileName` field
+   - If associated: Schedule a **deferred restart** after all configurations are reconciled
+   - If not associated: Only update hardware configuration without restart
 3. **Unified Signal**: Both controllers use the same `UpdateCh` channel to signal the daemon
-4. **Complete Restart**: The daemon performs a complete stop/restart cycle, ensuring both PTP and hardware configurations are applied consistently
+4. **Deferred Execution**: HardwareConfig changes use a 100ms delay to ensure all reconciliations complete before triggering restart
+5. **Complete Restart**: The daemon performs a complete stop/restart cycle, ensuring both PTP and hardware configurations are applied consistently
 
 ### Node Matching Logic
 

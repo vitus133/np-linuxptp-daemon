@@ -59,8 +59,8 @@ func init() {
 // registerHardwareConfigTypes registers our temporary hardwareConfig types with the scheme
 // TODO: Remove this once hardwareConfig types are available in ptp-operator
 func registerHardwareConfigTypes(s *runtime.Scheme) error {
-	s.AddKnownTypes(hwtypes.GroupVersion, &hwtypes.HardwareConfig{}, &hwtypes.HardwareConfigList{})
-	return nil
+	// Use the AddToScheme function from the types package to properly register types
+	return hwtypes.AddToScheme(s)
 }
 
 // Parse Command line flags

@@ -8,14 +8,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 // GroupVersion is group version used to register these objects
 var GroupVersion = schema.GroupVersion{Group: "ptp.openshift.io", Version: "v2alpha1"}
 
 // SchemeBuilder is used to add go types to the GroupVersionKind scheme
-var SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+var (
+	SchemeBuilder      = runtime.NewSchemeBuilder(addKnownTypes)
+	localSchemeBuilder = &SchemeBuilder
+	AddToScheme        = localSchemeBuilder.AddToScheme
+)
+
+// addKnownTypes adds the set of types defined in this package to the supplied scheme.
+func addKnownTypes(scheme *runtime.Scheme) error {
+	scheme.AddKnownTypes(GroupVersion,
+		&HardwareConfig{},
+		&HardwareConfigList{},
+	)
+	metav1.AddToGroupVersion(scheme, GroupVersion)
+	return nil
+}
 
 // ClockChain represents the root configuration structure for clock chain configuration.
 // It defines the complete system including shared definitions, subsystem structure,
@@ -830,8 +843,4 @@ func (in *ClockChain) DeepCopyInto(out *ClockChain) {
 		// Simplified deep copy for Behavior
 		*out.Behavior = *in.Behavior
 	}
-}
-
-func init() {
-	SchemeBuilder.Register(&HardwareConfig{}, &HardwareConfigList{})
 }
