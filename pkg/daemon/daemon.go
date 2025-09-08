@@ -18,6 +18,7 @@ import (
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/config"
@@ -242,6 +243,58 @@ type Daemon struct {
 
 	// Allow vendors to include plugins
 	pluginManager PluginManager
+}
+
+// UpdateHardwareConfig implements HardwareConfigUpdateHandler interface
+// This method updates the hardware configuration for the daemon
+func (dn *Daemon) UpdateHardwareConfig(hwProfiles []types.HardwareProfile) error {
+	glog.Infof("Received hardware configuration update with %d hardware profiles", len(hwProfiles))
+
+	// For now, just log the hardware configurations
+	// TODO: Implement actual hardware configuration application logic
+	for i, profile := range hwProfiles {
+		profileName := "unnamed"
+		if profile.Name != nil {
+			profileName = *profile.Name
+		}
+
+		glog.Infof("Hardware profile %d: %s", i, profileName)
+
+		if profile.Description != nil {
+			glog.Infof("  Description: %s", *profile.Description)
+		}
+
+		if profile.ClockChain != nil {
+			glog.Infof("  Clock chain with %d subsystems", len(profile.ClockChain.Structure))
+
+			// Log basic information about each subsystem
+			for j, subsystem := range profile.ClockChain.Structure {
+				plugin := subsystem.HardwarePlugin
+				if plugin == "" {
+					plugin = "default"
+				}
+				glog.Infof("    Subsystem %d: %s (Plugin: %s, Clock ID: %s)",
+					j, subsystem.Name, plugin, subsystem.DPLL.ClockID)
+			}
+
+			// Log behavior information if present
+			if profile.ClockChain.Behavior != nil {
+				glog.Infof("  Behavior: %d sources, %d conditions",
+					len(profile.ClockChain.Behavior.Sources),
+					len(profile.ClockChain.Behavior.Conditions))
+			}
+		}
+	}
+
+	// TODO: Apply hardware configurations to hardware devices
+	// This could involve:
+	// - Configuring DPLL settings through the netlink driver
+	// - Setting up hardware timestamping on network interfaces
+	// - Applying clock chain configurations to synchronization subsystems
+	// - Configuring eSync and phase adjustment settings
+	// - Managing hardware plugin-specific configurations
+
+	return nil
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance

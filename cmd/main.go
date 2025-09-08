@@ -26,6 +26,9 @@ import (
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/daemon"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/features"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/leap"
+
+	// TODO: Remove this once hardwareConfig types are available in ptp-operator
+	hwtypes "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpclient "github.com/k8snetworkplumbingwg/ptp-operator/pkg/client/clientset/versioned"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,6 +52,15 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(ptpv1.AddToScheme(scheme))
+	// Register our temporary hardwareConfig types
+	utilruntime.Must(registerHardwareConfigTypes(scheme))
+}
+
+// registerHardwareConfigTypes registers our temporary hardwareConfig types with the scheme
+// TODO: Remove this once hardwareConfig types are available in ptp-operator
+func registerHardwareConfigTypes(s *runtime.Scheme) error {
+	s.AddKnownTypes(hwtypes.GroupVersion, &hwtypes.HardwareConfig{}, &hwtypes.HardwareConfigList{})
+	return nil
 }
 
 // Parse Command line flags
@@ -59,7 +71,7 @@ func flagInit(cp *cliParams) {
 		"profile to start linuxptp processes")
 	flag.IntVar(&cp.pmcPollInterval, "pmc-poll-interval", config.DefaultPmcPollInterval,
 		"Interval for periodical PMC poll")
-	flag.BoolVar(&cp.useController, "use-controller", false,
+	flag.BoolVar(&cp.useController, "use-controller", true,
 		"Use Kubernetes controller to watch PtpConfig resources (default: false)")
 }
 
@@ -151,7 +163,7 @@ func main() {
 	features.SetFlags(version, ocpVersion)
 	features.Flags.Print()
 
-	go daemon.New(
+	daemonInstance := daemon.New(
 		nodeName,
 		daemon.PtpNamespace,
 		stdoutToSocket,
@@ -164,7 +176,8 @@ func main() {
 		closeProcessManager,
 		cp.pmcPollInterval,
 		tracker,
-	).Run()
+	)
+	go daemonInstance.Run()
 
 	tickerPull := time.NewTicker(time.Second * time.Duration(cp.updateInterval))
 	defer tickerPull.Stop()
@@ -219,6 +232,20 @@ func main() {
 
 		if err1 = ptpConfigReconciler.SetupWithManager(mgr); err1 != nil {
 			glog.Errorf("unable to create controller for PtpConfig: %v", err1)
+			return
+		}
+
+		// Setup HardwareConfig controller
+		hwConfigReconciler := &controller.HardwareConfigReconciler{
+			Client:                mgr.GetClient(),
+			Scheme:                mgr.GetScheme(),
+			NodeName:              nodeName,
+			HardwareConfigHandler: daemonInstance,
+			ConfigUpdate:          ptpConfUpdate, // Enable hardware config to trigger PTP restarts
+		}
+
+		if err1 = hwConfigReconciler.SetupWithManager(mgr); err1 != nil {
+			glog.Errorf("unable to create controller for HardwareConfig: %v", err1)
 			return
 		}
 
