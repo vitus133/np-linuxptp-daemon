@@ -10,7 +10,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 )
@@ -47,8 +46,7 @@ type HardwareConfigRestartTrigger interface {
 
 // Reconcile handles HardwareConfig changes and updates the daemon hardware configuration
 func (r *HardwareConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Reconciling HardwareConfig", "name", req.Name, "namespace", req.Namespace)
+	glog.Infof("Reconciling HardwareConfig name=%s namespace=%s", req.Name, req.Namespace)
 
 	// Get the HardwareConfig resource
 	hwConfig := &types.HardwareConfig{}
@@ -56,10 +54,10 @@ func (r *HardwareConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// HardwareConfig was deleted, trigger recalculation of hardware configurations
-			log.Info("HardwareConfig deleted, recalculating hardware configurations", "name", req.Name)
+			glog.Infof("HardwareConfig deleted, recalculating hardware configurations name=%s", req.Name)
 			return r.reconcileAllConfigs(ctx)
 		}
-		log.Error(err, "Failed to get HardwareConfig")
+		glog.Errorf("Failed to get HardwareConfig: %v", err)
 		return ctrl.Result{}, err
 	}
 
@@ -69,12 +67,10 @@ func (r *HardwareConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // reconcileAllConfigs calculates the effective hardware configuration for this node by examining all HardwareConfigs
 func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-
 	// List all HardwareConfigs in the cluster
 	hwConfigList := &types.HardwareConfigList{}
 	if err := r.List(ctx, hwConfigList); err != nil {
-		log.Error(err, "Failed to list HardwareConfigs")
+		glog.Errorf("Failed to list HardwareConfigs: %v", err)
 		return ctrl.Result{}, err
 	}
 
@@ -91,7 +87,7 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 	// Calculate the applicable hardware configurations for this node
 	applicableConfigs, err := r.calculateNodeHardwareConfigs(ctx, hwConfigList.Items)
 	if err != nil {
-		log.Error(err, "Failed to calculate node hardware configurations")
+		glog.Errorf("Failed to calculate node hardware configurations: %v", err)
 		return ctrl.Result{}, err
 	}
 
@@ -103,12 +99,12 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 		if r.HardwareConfigHandler != nil {
 			err = r.HardwareConfigHandler.UpdateHardwareConfig(applicableConfigs)
 			if err != nil {
-				log.Error(err, "Failed to update daemon hardware configuration")
+				glog.Errorf("Failed to update daemon hardware configuration: %v", err)
 				return ctrl.Result{}, err
 			}
 		}
 
-		log.Info("Successfully updated daemon hardware configuration", "deviceConfigs", len(applicableConfigs))
+		glog.Infof("Successfully updated daemon hardware configuration deviceConfigs=%d", len(applicableConfigs))
 	} else {
 		glog.Infof("No applicable hardware configurations found for node %s", r.NodeName)
 
@@ -116,7 +112,7 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 		if r.HardwareConfigHandler != nil {
 			err = r.HardwareConfigHandler.UpdateHardwareConfig([]types.HardwareProfile{})
 			if err != nil {
-				log.Error(err, "Failed to clear daemon hardware configuration")
+				glog.Errorf("Failed to clear daemon hardware configuration: %v", err)
 				return ctrl.Result{}, err
 			}
 		}
@@ -128,8 +124,6 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 // scheduleDeferredRestart schedules a restart to happen after a short delay
 // This allows all HardwareConfig reconciliations to complete before triggering the restart
 func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) {
-	log := log.FromContext(ctx)
-
 	// Use a goroutine with a short delay to allow all reconciliations to complete
 	go func() {
 		// Wait a short time for all reconciliations to complete
@@ -138,9 +132,9 @@ func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) 
 		if r.ConfigUpdate != nil {
 			err := r.ConfigUpdate.TriggerRestartForHardwareChange()
 			if err != nil {
-				log.Error(err, "Failed to trigger deferred PTP restart for hardware configuration change")
+				glog.Errorf("Failed to trigger deferred PTP restart for hardware configuration change: %v", err)
 			} else {
-				log.Info("Successfully triggered deferred PTP restart due to hardware configuration change")
+				glog.Infof("Successfully triggered deferred PTP restart due to hardware configuration change")
 			}
 		}
 	}()
@@ -148,59 +142,43 @@ func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) 
 
 // calculateNodeHardwareConfigs determines which hardware configurations should be applied to this node
 func (r *HardwareConfigReconciler) calculateNodeHardwareConfigs(ctx context.Context, hwConfigs []types.HardwareConfig) ([]types.HardwareProfile, error) {
-	log := log.FromContext(ctx)
-
 	var applicableProfiles []types.HardwareProfile
 
 	// For now, we apply all hardware configurations to all nodes
 	// This can be enhanced later with node matching logic similar to PtpConfig
 	for _, hwConfig := range hwConfigs {
-		log.Info("Processing HardwareConfig", "name", hwConfig.Name, "profile", getProfileName(hwConfig.Spec.Profile))
+		glog.Infof("Processing HardwareConfig name=%s profile=%s", hwConfig.Name, getProfileName(hwConfig.Spec.Profile))
 
 		// TODO: Add node-specific filtering logic here
 		// For now, we include all hardware profiles
 		applicableProfiles = append(applicableProfiles, hwConfig.Spec.Profile)
-		log.Info("Added hardware profile", "profileName", getProfileName(hwConfig.Spec.Profile), "relatedPtpProfile", hwConfig.Spec.RelatedPtpProfileName)
+		glog.Infof("Added hardware profile profileName=%s relatedPtpProfile=%s", getProfileName(hwConfig.Spec.Profile), hwConfig.Spec.RelatedPtpProfileName)
 	}
 
-	log.Info("Calculated hardware configurations for node", "node", r.NodeName, "totalProfiles", len(applicableProfiles))
+	glog.Infof("Calculated hardware configurations for node node=%s totalProfiles=%d", r.NodeName, len(applicableProfiles))
 	return applicableProfiles, nil
 }
 
-// checkIfActiveProfilesAffected determines if any hardware configs are associated with currently active PTP profiles
+// checkIfActiveProfilesAffected determines if hardware config changes should trigger PTP restart
+// We restart whenever hardware configs change to ensure PTP and hardware configurations stay synchronized
 func (r *HardwareConfigReconciler) checkIfActiveProfilesAffected(ctx context.Context, hwConfigs []types.HardwareConfig) bool {
-	log := log.FromContext(ctx)
-
 	// Get currently active PTP profiles from the daemon
 	if r.ConfigUpdate == nil {
-		log.Info("No ConfigUpdate interface available, cannot check active PTP profiles")
+		glog.Infof("No ConfigUpdate interface available, cannot check active PTP profiles")
 		return false
 	}
 
 	activePTPProfiles := r.ConfigUpdate.GetCurrentPTPProfiles()
-	if len(activePTPProfiles) == 0 {
-		log.Info("No active PTP profiles found")
-		return false
+	glog.Infof("Hardware config change detected, will trigger PTP restart activeProfiles=%v hardwareConfigs=%d", activePTPProfiles, len(hwConfigs))
+
+	// Always restart when hardware configs change, as long as there are active PTP profiles
+	// This ensures PTP and hardware configurations remain synchronized
+	if len(activePTPProfiles) > 0 {
+		glog.Infof("Triggering PTP restart due to hardware configuration change")
+		return true
 	}
 
-	log.Info("Checking hardware config associations", "activeProfiles", activePTPProfiles, "hardwareConfigs", len(hwConfigs))
-
-	// Check if any hardware config is associated with an active PTP profile
-	for _, hwConfig := range hwConfigs {
-		if hwConfig.Spec.RelatedPtpProfileName != "" {
-			for _, activeProfile := range activePTPProfiles {
-				if hwConfig.Spec.RelatedPtpProfileName == activeProfile {
-					log.Info("Found hardware config associated with active PTP profile",
-						"hardwareConfig", hwConfig.Name,
-						"relatedProfile", hwConfig.Spec.RelatedPtpProfileName,
-						"activeProfile", activeProfile)
-					return true
-				}
-			}
-		}
-	}
-
-	log.Info("No hardware configs are associated with currently active PTP profiles")
+	glog.Infof("No active PTP profiles, skipping hardware config restart")
 	return false
 }
 

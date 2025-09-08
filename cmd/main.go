@@ -18,6 +18,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
@@ -198,6 +199,9 @@ func main() {
 	var mgrCancel context.CancelFunc
 	if cp.useController {
 		glog.Info("Setting up controller manager for PtpConfig resources")
+
+		// Setup controller-runtime logger to use klog/glog
+		ctrl.SetLogger(klog.NewKlogr())
 
 		// Create manager
 		var err1 error

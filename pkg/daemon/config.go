@@ -226,8 +226,8 @@ func (conf *Ptp4lConf) PopulatePtp4lConf(config *string) error {
 	if config != nil {
 		for _, line := range strings.Split(*config, "\n") {
 			line = strings.TrimSpace(line)
-			glog.Infof("Processing line: %s", line)
-			if strings.HasPrefix(line, "#") {
+			// Skip empty lines and comments
+			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			} else if strings.HasPrefix(line, "[") {
 				currentLine := strings.Split(line, "]")
@@ -253,7 +253,6 @@ func (conf *Ptp4lConf) PopulatePtp4lConf(config *string) error {
 					}
 				}
 			} else {
-				glog.Infof("Config option not in section: %s", *config)
 				return errors.New("Config option not in section: " + line)
 			}
 		}
