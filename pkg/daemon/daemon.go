@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/hardwareconfig"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
@@ -233,8 +234,8 @@ type Daemon struct {
 
 	hwconfigs *[]ptpv1.HwConfig
 
-	// New hardware configs from HardwareConfig CRs
-	hardwareConfigs []types.HardwareConfig
+	// Hardware config manager handles hardware configurations from HardwareConfig CRs
+	hardwareConfigManager *hardwareconfig.HardwareConfigManager
 
 	refreshNodePtpDevice *bool
 
@@ -248,116 +249,11 @@ type Daemon struct {
 	pluginManager PluginManager
 }
 
-// hasHardwareConfigForProfile checks if hardware config is available for a PTP profile
-func (dn *Daemon) hasHardwareConfigForProfile(nodeProfile *ptpv1.PtpProfile) bool {
-	if nodeProfile.Name == nil {
-		return false
-	}
-
-	for _, hwConfig := range dn.hardwareConfigs {
-		if hwConfig.Spec.RelatedPtpProfileName == *nodeProfile.Name {
-			return true
-		}
-	}
-	return false
-}
-
-// getHardwareConfigsForProfile returns hardware configs associated with a PTP profile
-func (dn *Daemon) getHardwareConfigsForProfile(nodeProfile *ptpv1.PtpProfile) []types.HardwareProfile {
-	if nodeProfile.Name == nil {
-		return nil
-	}
-
-	var relevantConfigs []types.HardwareProfile
-	for _, hwConfig := range dn.hardwareConfigs {
-		if hwConfig.Spec.RelatedPtpProfileName == *nodeProfile.Name {
-			relevantConfigs = append(relevantConfigs, hwConfig.Spec.Profile)
-		}
-	}
-	return relevantConfigs
-}
-
-// applyHardwareConfigsForProfile applies hardware configurations for a PTP profile
-func (dn *Daemon) applyHardwareConfigsForProfile(nodeProfile *ptpv1.PtpProfile) error {
-	relevantConfigs := dn.getHardwareConfigsForProfile(nodeProfile)
-
-	glog.Infof("Applying %d hardware configurations for PTP profile %s",
-		len(relevantConfigs), *nodeProfile.Name)
-
-	for _, hwProfile := range relevantConfigs {
-		profileName := "unnamed"
-		if hwProfile.Name != nil {
-			profileName = *hwProfile.Name
-		}
-
-		glog.Infof("Applying hardware profile: %s", profileName)
-
-		// TODO: Implement actual hardware configuration application
-		// For now, just log that we would apply the configuration
-		if hwProfile.ClockChain != nil {
-			for _, subsystem := range hwProfile.ClockChain.Structure {
-				glog.Infof("  Would configure subsystem: %s (Plugin: %s)",
-					subsystem.Name, subsystem.HardwarePlugin)
-			}
-		}
-	}
-	// TODO !!!!!!! until implemented above, still call plugins
-	dn.pluginManager.OnPTPConfigChange(nodeProfile)
-	return nil
-}
-
 func (dn *Daemon) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
-	glog.Infof("Received hardware configuration update with %d hardware configs", len(hwConfigs))
-
-	// Store the hardware configs for use during daemon restart
-	dn.hardwareConfigs = make([]types.HardwareConfig, len(hwConfigs))
-	copy(dn.hardwareConfigs, hwConfigs)
-
-	// Log the hardware configurations for debugging
-	for i, hwConfig := range hwConfigs {
-		profile := hwConfig.Spec.Profile
-		profileName := "unnamed"
-		if profile.Name != nil {
-			profileName = *profile.Name
-		}
-
-		glog.Infof("Hardware config %d: %s (Related PTP: %s)", i, profileName, hwConfig.Spec.RelatedPtpProfileName)
-
-		if profile.Description != nil {
-			glog.Infof("  Description: %s", *profile.Description)
-		}
-
-		if profile.ClockChain != nil {
-			glog.Infof("  Clock chain with %d subsystems", len(profile.ClockChain.Structure))
-
-			// Log basic information about each subsystem
-			for j, subsystem := range profile.ClockChain.Structure {
-				plugin := subsystem.HardwarePlugin
-				if plugin == "" {
-					plugin = "default"
-				}
-				glog.Infof("    Subsystem %d: %s (Plugin: %s, Clock ID: %s)",
-					j, subsystem.Name, plugin, subsystem.DPLL.ClockID)
-			}
-
-			// Log behavior information if present
-			if profile.ClockChain.Behavior != nil {
-				glog.Infof("  Behavior: %d sources, %d conditions",
-					len(profile.ClockChain.Behavior.Sources),
-					len(profile.ClockChain.Behavior.Conditions))
-			}
-		}
+	if dn.hardwareConfigManager == nil {
+		return fmt.Errorf("hardware config manager not initialized")
 	}
-
-	// TODO: Apply hardware configurations to hardware devices
-	// This could involve:
-	// - Configuring DPLL settings through the netlink driver
-	// - Setting up hardware timestamping on network interfaces
-	// - Applying clock chain configurations to synchronization subsystems
-	// - Configuring eSync and phase adjustment settings
-	// - Managing hardware plugin-specific configurations
-
-	return nil
+	return dn.hardwareConfigManager.UpdateHardwareConfig(hwConfigs)
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance
@@ -388,18 +284,19 @@ func New(
 	}
 	tracker.processManager = pm
 	return &Daemon{
-		nodeName:             nodeName,
-		namespace:            namespace,
-		stdoutToSocket:       stdoutToSocket,
-		kubeClient:           kubeClient,
-		ptpUpdate:            ptpUpdate,
-		pluginManager:        pluginManager,
-		hwconfigs:            hwconfigs,
-		refreshNodePtpDevice: refreshNodePtpDevice,
-		pmcPollInterval:      pmcPollInterval,
-		processManager:       pm,
-		readyTracker:         tracker,
-		stopCh:               stopCh,
+		nodeName:              nodeName,
+		namespace:             namespace,
+		stdoutToSocket:        stdoutToSocket,
+		kubeClient:            kubeClient,
+		ptpUpdate:             ptpUpdate,
+		pluginManager:         pluginManager,
+		hwconfigs:             hwconfigs,
+		hardwareConfigManager: hardwareconfig.NewHardwareConfigManager(),
+		refreshNodePtpDevice:  refreshNodePtpDevice,
+		pmcPollInterval:       pmcPollInterval,
+		processManager:        pm,
+		readyTracker:          tracker,
+		stopCh:                stopCh,
 	}
 }
 
@@ -616,11 +513,16 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	// Check if hardware configs are available for this profile
 	// If yes, apply hardware configs instead of calling plugins
 	// This maintains backward compatibility by falling back to plugins
-	if dn.hasHardwareConfigForProfile(nodeProfile) {
+	if dn.hardwareConfigManager.HasHardwareConfigForProfile(nodeProfile) {
 		glog.Infof("Using hardware configs for PTP profile %s instead of plugins", *nodeProfile.Name)
-		if err := dn.applyHardwareConfigsForProfile(nodeProfile); err != nil {
-			glog.Errorf("Failed to apply hardware configs for profile %s, falling back to plugins: %v",
-				*nodeProfile.Name, err)
+		if err := dn.hardwareConfigManager.ApplyHardwareConfigsForProfile(nodeProfile); err != nil {
+			// Check if this is the expected "not implemented" error that should trigger plugin fallback
+			if err.Error() == "hardware config application not implemented, use plugin fallback" {
+				glog.Infof("Hardware config application not implemented, falling back to plugins for profile %s",
+					*nodeProfile.Name)
+			} else {
+				glog.Errorf("Failed to apply hardware configs for profile %s: %v", *nodeProfile.Name, err)
+			}
 			// Fall back to plugins for backward compatibility
 			dn.pluginManager.OnPTPConfigChange(nodeProfile)
 		}
