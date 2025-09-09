@@ -233,6 +233,9 @@ type Daemon struct {
 
 	hwconfigs *[]ptpv1.HwConfig
 
+	// New hardware configs from HardwareConfig CRs
+	hardwareConfigs []types.HardwareConfig
+
 	refreshNodePtpDevice *bool
 
 	// channel ensure LinuxPTP.Run() exit when main function exits.
@@ -245,20 +248,80 @@ type Daemon struct {
 	pluginManager PluginManager
 }
 
-// UpdateHardwareConfig implements HardwareConfigUpdateHandler interface
-// This method updates the hardware configuration for the daemon
-func (dn *Daemon) UpdateHardwareConfig(hwProfiles []types.HardwareProfile) error {
-	glog.Infof("Received hardware configuration update with %d hardware profiles", len(hwProfiles))
+// hasHardwareConfigForProfile checks if hardware config is available for a PTP profile
+func (dn *Daemon) hasHardwareConfigForProfile(nodeProfile *ptpv1.PtpProfile) bool {
+	if nodeProfile.Name == nil {
+		return false
+	}
 
-	// For now, just log the hardware configurations
-	// TODO: Implement actual hardware configuration application logic
-	for i, profile := range hwProfiles {
+	for _, hwConfig := range dn.hardwareConfigs {
+		if hwConfig.Spec.RelatedPtpProfileName == *nodeProfile.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// getHardwareConfigsForProfile returns hardware configs associated with a PTP profile
+func (dn *Daemon) getHardwareConfigsForProfile(nodeProfile *ptpv1.PtpProfile) []types.HardwareProfile {
+	if nodeProfile.Name == nil {
+		return nil
+	}
+
+	var relevantConfigs []types.HardwareProfile
+	for _, hwConfig := range dn.hardwareConfigs {
+		if hwConfig.Spec.RelatedPtpProfileName == *nodeProfile.Name {
+			relevantConfigs = append(relevantConfigs, hwConfig.Spec.Profile)
+		}
+	}
+	return relevantConfigs
+}
+
+// applyHardwareConfigsForProfile applies hardware configurations for a PTP profile
+func (dn *Daemon) applyHardwareConfigsForProfile(nodeProfile *ptpv1.PtpProfile) error {
+	relevantConfigs := dn.getHardwareConfigsForProfile(nodeProfile)
+
+	glog.Infof("Applying %d hardware configurations for PTP profile %s",
+		len(relevantConfigs), *nodeProfile.Name)
+
+	for _, hwProfile := range relevantConfigs {
+		profileName := "unnamed"
+		if hwProfile.Name != nil {
+			profileName = *hwProfile.Name
+		}
+
+		glog.Infof("Applying hardware profile: %s", profileName)
+
+		// TODO: Implement actual hardware configuration application
+		// For now, just log that we would apply the configuration
+		if hwProfile.ClockChain != nil {
+			for _, subsystem := range hwProfile.ClockChain.Structure {
+				glog.Infof("  Would configure subsystem: %s (Plugin: %s)",
+					subsystem.Name, subsystem.HardwarePlugin)
+			}
+		}
+	}
+	// TODO !!!!!!! until implemented above, still call plugins
+	dn.pluginManager.OnPTPConfigChange(nodeProfile)
+	return nil
+}
+
+func (dn *Daemon) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
+	glog.Infof("Received hardware configuration update with %d hardware configs", len(hwConfigs))
+
+	// Store the hardware configs for use during daemon restart
+	dn.hardwareConfigs = make([]types.HardwareConfig, len(hwConfigs))
+	copy(dn.hardwareConfigs, hwConfigs)
+
+	// Log the hardware configurations for debugging
+	for i, hwConfig := range hwConfigs {
+		profile := hwConfig.Spec.Profile
 		profileName := "unnamed"
 		if profile.Name != nil {
 			profileName = *profile.Name
 		}
 
-		glog.Infof("Hardware profile %d: %s", i, profileName)
+		glog.Infof("Hardware config %d: %s (Related PTP: %s)", i, profileName, hwConfig.Spec.RelatedPtpProfileName)
 
 		if profile.Description != nil {
 			glog.Infof("  Description: %s", *profile.Description)
@@ -550,7 +613,23 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	if test {
 		configPrefix = testDir
 	}
-	dn.pluginManager.OnPTPConfigChange(nodeProfile)
+	// Check if hardware configs are available for this profile
+	// If yes, apply hardware configs instead of calling plugins
+	// This maintains backward compatibility by falling back to plugins
+	if dn.hasHardwareConfigForProfile(nodeProfile) {
+		glog.Infof("Using hardware configs for PTP profile %s instead of plugins", *nodeProfile.Name)
+		if err := dn.applyHardwareConfigsForProfile(nodeProfile); err != nil {
+			glog.Errorf("Failed to apply hardware configs for profile %s, falling back to plugins: %v",
+				*nodeProfile.Name, err)
+			// Fall back to plugins for backward compatibility
+			dn.pluginManager.OnPTPConfigChange(nodeProfile)
+		}
+	} else {
+		// No hardware configs available, use plugins (backward compatibility)
+		glog.Infof("No hardware configs found for PTP profile %s, using plugins",
+			*nodeProfile.Name)
+		dn.pluginManager.OnPTPConfigChange(nodeProfile)
+	}
 
 	var err error
 	var cmdLine string

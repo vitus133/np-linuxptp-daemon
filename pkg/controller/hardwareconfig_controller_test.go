@@ -10,12 +10,12 @@ import (
 
 // MockHardwareConfigHandler implements HardwareConfigUpdateHandler for testing
 type MockHardwareConfigHandler struct {
-	LastUpdateProfiles []types.HardwareProfile
-	UpdateCallCount    int
+	LastUpdateConfigs []types.HardwareConfig
+	UpdateCallCount   int
 }
 
-func (m *MockHardwareConfigHandler) UpdateHardwareConfig(hwProfiles []types.HardwareProfile) error {
-	m.LastUpdateProfiles = hwProfiles
+func (m *MockHardwareConfigHandler) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
+	m.LastUpdateConfigs = hwConfigs
 	m.UpdateCallCount++
 	return nil
 }
@@ -37,18 +37,18 @@ func (m *MockHardwareConfigRestartTrigger) GetCurrentPTPProfiles() []string {
 
 func TestCalculateNodeHardwareConfigs(t *testing.T) {
 	testCases := []struct {
-		name                  string
-		nodeName              string
-		hwConfigs             []types.HardwareConfig
-		expectedProfilesCount int
-		expectedProfileNames  []string
+		name                 string
+		nodeName             string
+		hwConfigs            []types.HardwareConfig
+		expectedConfigsCount int
+		expectedConfigNames  []string
 	}{
 		{
-			name:                  "no hardware configs",
-			nodeName:              "test-node",
-			hwConfigs:             []types.HardwareConfig{},
-			expectedProfilesCount: 0,
-			expectedProfileNames:  []string{},
+			name:                 "no hardware configs",
+			nodeName:             "test-node",
+			hwConfigs:            []types.HardwareConfig{},
+			expectedConfigsCount: 0,
+			expectedConfigNames:  []string{},
 		},
 		{
 			name:     "single hardware config with grandmaster profile",
@@ -80,8 +80,8 @@ func TestCalculateNodeHardwareConfigs(t *testing.T) {
 					},
 				},
 			},
-			expectedProfilesCount: 1,
-			expectedProfileNames:  []string{"grandmaster-profile"},
+			expectedConfigsCount: 1,
+			expectedConfigNames:  []string{"grandmaster-profile"},
 		},
 		{
 			name:     "multiple hardware configs",
@@ -136,8 +136,8 @@ func TestCalculateNodeHardwareConfigs(t *testing.T) {
 					},
 				},
 			},
-			expectedProfilesCount: 2,
-			expectedProfileNames:  []string{"boundary-clock-profile", "ordinary-clock-profile"},
+			expectedConfigsCount: 2,
+			expectedConfigNames:  []string{"boundary-clock-profile", "ordinary-clock-profile"},
 		},
 	}
 
@@ -153,30 +153,31 @@ func TestCalculateNodeHardwareConfigs(t *testing.T) {
 			// Verify no error occurred
 			assert.NoError(t, err)
 
-			// Verify the number of hardware profiles
-			assert.Len(t, result, tc.expectedProfilesCount,
-				"Expected %d hardware profiles, got %d", tc.expectedProfilesCount, len(result))
+			// Verify the number of hardware configs
+			assert.Len(t, result, tc.expectedConfigsCount,
+				"Expected %d hardware configs, got %d", tc.expectedConfigsCount, len(result))
 
-			// Verify profile names match expected
-			var actualProfileNames []string
-			for _, profile := range result {
-				if profile.Name != nil {
-					actualProfileNames = append(actualProfileNames, *profile.Name)
+			// Verify config names match expected (based on profile names within configs)
+			var actualConfigNames []string
+			for _, hwConfig := range result {
+				if hwConfig.Spec.Profile.Name != nil {
+					actualConfigNames = append(actualConfigNames, *hwConfig.Spec.Profile.Name)
 				} else {
-					actualProfileNames = append(actualProfileNames, "unnamed")
+					actualConfigNames = append(actualConfigNames, "unnamed")
 				}
 			}
-			assert.ElementsMatch(t, tc.expectedProfileNames, actualProfileNames,
-				"Expected profile names %v, got %v", tc.expectedProfileNames, actualProfileNames)
+			assert.ElementsMatch(t, tc.expectedConfigNames, actualConfigNames,
+				"Expected config names %v, got %v", tc.expectedConfigNames, actualConfigNames)
 
 			// Additional validations
-			for i, profile := range result {
+			for i, hwConfig := range result {
+				profile := hwConfig.Spec.Profile
 				if profile.Name != nil {
-					assert.NotEmpty(t, *profile.Name, "Profile name should not be empty for profile %d", i)
+					assert.NotEmpty(t, *profile.Name, "Profile name should not be empty for config %d", i)
 				}
-				assert.NotNil(t, profile.ClockChain, "ClockChain should not be nil for profile %d", i)
+				assert.NotNil(t, profile.ClockChain, "ClockChain should not be nil for config %d", i)
 				if profile.ClockChain != nil {
-					assert.NotEmpty(t, profile.ClockChain.Structure, "ClockChain structure should not be empty for profile %d", i)
+					assert.NotEmpty(t, profile.ClockChain.Structure, "ClockChain structure should not be empty for config %d", i)
 				}
 			}
 		})
@@ -192,67 +193,77 @@ func TestHardwareConfigUpdateHandlerIntegration(t *testing.T) {
 		HardwareConfigHandler: mockHandler,
 	}
 
-	// Create some test hardware profiles
-	testProfiles := []types.HardwareProfile{
+	// Create some test hardware configs
+	testConfigs := []types.HardwareConfig{
 		{
-			Name:        stringPtr("ordinary-clock-profile"),
-			Description: stringPtr("Test ordinary clock configuration"),
-			ClockChain: &types.ClockChain{
-				Structure: []types.Subsystem{
-					{
-						Name: "oc-subsystem",
-						DPLL: types.DPLL{
-							ClockID: "0x1234567890abcdef",
-						},
-						Ethernet: []types.Ethernet{
+			Spec: types.HardwareConfigSpec{
+				Profile: types.HardwareProfile{
+					Name:        stringPtr("ordinary-clock-profile"),
+					Description: stringPtr("Test ordinary clock configuration"),
+					ClockChain: &types.ClockChain{
+						Structure: []types.Subsystem{
 							{
-								Ports: []string{"ens1f0"},
+								Name: "oc-subsystem",
+								DPLL: types.DPLL{
+									ClockID: "0x1234567890abcdef",
+								},
+								Ethernet: []types.Ethernet{
+									{
+										Ports: []string{"ens1f0"},
+									},
+								},
 							},
 						},
 					},
 				},
+				RelatedPtpProfileName: "ordinary-clock",
 			},
 		},
 		{
-			Name:        stringPtr("grandmaster-profile"),
-			Description: stringPtr("Test grandmaster configuration"),
-			ClockChain: &types.ClockChain{
-				Structure: []types.Subsystem{
-					{
-						Name:           "gm-subsystem",
-						HardwarePlugin: "intel-e810",
-						DPLL: types.DPLL{
-							ClockID: "0xaabbccddeeff1122",
-						},
-						Ethernet: []types.Ethernet{
+			Spec: types.HardwareConfigSpec{
+				Profile: types.HardwareProfile{
+					Name:        stringPtr("grandmaster-profile"),
+					Description: stringPtr("Test grandmaster configuration"),
+					ClockChain: &types.ClockChain{
+						Structure: []types.Subsystem{
 							{
-								Ports: []string{"ens2f0", "ens2f1"},
+								Name:           "gm-subsystem",
+								HardwarePlugin: "intel-e810",
+								DPLL: types.DPLL{
+									ClockID: "0xaabbccddeeff1122",
+								},
+								Ethernet: []types.Ethernet{
+									{
+										Ports: []string{"ens2f0", "ens2f1"},
+									},
+								},
 							},
 						},
 					},
 				},
+				RelatedPtpProfileName: "grandmaster",
 			},
 		},
 	}
 
 	// Call UpdateHardwareConfig through the handler
-	err := reconciler.HardwareConfigHandler.UpdateHardwareConfig(testProfiles)
+	err := reconciler.HardwareConfigHandler.UpdateHardwareConfig(testConfigs)
 
 	// Verify the call succeeded
 	assert.NoError(t, err)
 
 	// Verify the handler received the correct configurations
 	assert.Equal(t, 1, mockHandler.UpdateCallCount, "Handler should have been called exactly once")
-	assert.Len(t, mockHandler.LastUpdateProfiles, 2, "Handler should have received 2 hardware profiles")
+	assert.Len(t, mockHandler.LastUpdateConfigs, 2, "Handler should have received 2 hardware configs")
 
 	// Verify the specific profiles
-	assert.Equal(t, "ordinary-clock-profile", *mockHandler.LastUpdateProfiles[0].Name)
-	assert.Equal(t, "Test ordinary clock configuration", *mockHandler.LastUpdateProfiles[0].Description)
-	assert.NotNil(t, mockHandler.LastUpdateProfiles[0].ClockChain)
+	assert.Equal(t, "ordinary-clock-profile", *mockHandler.LastUpdateConfigs[0].Spec.Profile.Name)
+	assert.Equal(t, "Test ordinary clock configuration", *mockHandler.LastUpdateConfigs[0].Spec.Profile.Description)
+	assert.NotNil(t, mockHandler.LastUpdateConfigs[0].Spec.Profile.ClockChain)
 
-	assert.Equal(t, "grandmaster-profile", *mockHandler.LastUpdateProfiles[1].Name)
-	assert.Equal(t, "Test grandmaster configuration", *mockHandler.LastUpdateProfiles[1].Description)
-	assert.NotNil(t, mockHandler.LastUpdateProfiles[1].ClockChain)
+	assert.Equal(t, "grandmaster-profile", *mockHandler.LastUpdateConfigs[1].Spec.Profile.Name)
+	assert.Equal(t, "Test grandmaster configuration", *mockHandler.LastUpdateConfigs[1].Spec.Profile.Description)
+	assert.NotNil(t, mockHandler.LastUpdateConfigs[1].Spec.Profile.ClockChain)
 }
 
 func TestCheckIfActiveProfilesAffected(t *testing.T) {
@@ -386,8 +397,8 @@ func TestRestartTriggerIntegration(t *testing.T) {
 	// Test the deferred restart mechanism
 	reconciler.scheduleDeferredRestart(nil)
 
-	// Wait for the deferred restart to execute
-	time.Sleep(150 * time.Millisecond)
+	// Wait for the deferred restart to execute (implementation uses 200ms delay)
+	time.Sleep(250 * time.Millisecond)
 
 	// Verify that the restart was triggered after the delay
 	assert.Equal(t, 1, mockTrigger.RestartTriggerCount, "Restart should have been triggered once after delay")
