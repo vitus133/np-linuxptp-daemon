@@ -33,6 +33,9 @@ type HardwareConfigReconciler struct {
 	// ConfigUpdate is used to trigger PTP process restarts when hardware config changes
 	// affect currently active PTP profiles
 	ConfigUpdate HardwareConfigRestartTrigger
+
+	// lastRestartTime tracks when the last restart was scheduled to prevent multiple restarts
+	lastRestartTime time.Time
 }
 
 // HardwareConfigRestartTrigger interface for triggering PTP restarts
@@ -79,9 +82,11 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 	needsPTPRestart := r.checkIfActiveProfilesAffected(ctx, hwConfigList.Items)
 
 	if needsPTPRestart {
-		glog.Infof("HardwareConfig change affects active PTP profiles on node %s, will trigger PTP restart after reconciling all configs", r.NodeName)
+		glog.Infof("HardwareConfig change affects active PTP profiles on node %s, scheduling deferred restart", r.NodeName)
 		// Don't trigger restart immediately - wait for all configs to be reconciled first
 		r.scheduleDeferredRestart(ctx)
+	} else {
+		glog.Infof("HardwareConfig change does not require PTP restart (no active profiles affected)")
 	}
 
 	// Calculate the applicable hardware configurations for this node
@@ -123,11 +128,24 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 
 // scheduleDeferredRestart schedules a restart to happen after a short delay
 // This allows all HardwareConfig reconciliations to complete before triggering the restart
+// It also prevents multiple restarts within a short time window
 func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) {
+	// Check if a restart was recently scheduled (within last 2 seconds)
+	now := time.Now()
+	timeSinceLastRestart := now.Sub(r.lastRestartTime)
+	if timeSinceLastRestart < 2*time.Second {
+		glog.Infof("Restart already scheduled recently (%v ago), skipping duplicate restart request", timeSinceLastRestart)
+		return
+	}
+
+	glog.Infof("Scheduling deferred restart for hardware configuration change")
+	// Update the last restart time
+	r.lastRestartTime = now
+
 	// Use a goroutine with a short delay to allow all reconciliations to complete
 	go func() {
 		// Wait a short time for all reconciliations to complete
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 		if r.ConfigUpdate != nil {
 			err := r.ConfigUpdate.TriggerRestartForHardwareChange()
