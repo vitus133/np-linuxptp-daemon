@@ -997,11 +997,11 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string, pm *Plugi
 	// Use cached PTP state detector (no instance creation overhead)
 	p.tbcStateDetector.ProcessTBCTransition(output, func(conditionType string, portName string) {
 		switch conditionType {
-		case "normal":
+		case "locked":
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
 			p.lastTransitionResult = event.PTP_LOCKED
 			p.sendPtp4lEvent()
-		case "holdover":
+		case "lost":
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
 			p.lastTransitionResult = event.PTP_FREERUN
 			p.sendPtp4lEvent()
