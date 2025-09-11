@@ -417,18 +417,21 @@ func TestDeferredRestartDebouncing(t *testing.T) {
 		ConfigUpdate:          mockTrigger,
 	}
 
-	// Schedule multiple deferred restarts
+	// Schedule the first deferred restart
 	reconciler.scheduleDeferredRestart(nil)
+
+	// Wait a bit to ensure the first restart is scheduled
+	time.Sleep(10 * time.Millisecond)
+
+	// Schedule additional deferred restarts - these should be debounced
 	reconciler.scheduleDeferredRestart(nil)
 	reconciler.scheduleDeferredRestart(nil)
 
-	// Wait for all deferred restarts to execute
-	time.Sleep(200 * time.Millisecond)
+	// Wait longer than the goroutine delay to ensure completion
+	time.Sleep(250 * time.Millisecond)
 
-	// The restart should have been triggered multiple times (once per call)
-	// In a real scenario, we might want to implement actual debouncing,
-	// but for now we allow multiple calls
-	assert.True(t, mockTrigger.RestartTriggerCount >= 1, "At least one restart should have been triggered")
+	// Only the first restart should have been triggered due to debouncing
+	assert.Equal(t, 1, mockTrigger.RestartTriggerCount, "Only one restart should have been triggered due to debouncing")
 }
 
 func TestHardwareConfigReconcilerFields(t *testing.T) {

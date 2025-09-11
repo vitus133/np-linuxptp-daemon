@@ -73,6 +73,18 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 	return nil
 }
 
+// UpdateHardwareConfigWithNotification updates hardware configs and notifies state detector to rebuild caches
+func (hcm *HardwareConfigManager) UpdateHardwareConfigWithNotification(hwConfigs []types.HardwareConfig, psd *PTPStateDetector) error {
+	err := hcm.UpdateHardwareConfig(hwConfigs)
+	if err != nil {
+		return err
+	}
+	if psd != nil {
+		psd.rebuildCaches()
+	}
+	return nil
+}
+
 // HasHardwareConfigForProfile checks if hardware config is available for a PTP profile
 func (hcm *HardwareConfigManager) HasHardwareConfigForProfile(nodeProfile *ptpv1.PtpProfile) bool {
 	if nodeProfile.Name == nil {
