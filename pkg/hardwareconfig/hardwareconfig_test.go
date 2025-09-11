@@ -308,8 +308,13 @@ func TestDetermineConditionType(t *testing.T) {
 			expected: "lost",
 		},
 		{
-			name:     "no condition",
+			name:     "lost - announce receipt timeout",
 			event:    "MASTER to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES",
+			expected: "lost",
+		},
+		{
+			name:     "no condition",
+			event:    "LISTENING to MASTER on INITIALIZATION",
 			expected: "",
 		},
 	}

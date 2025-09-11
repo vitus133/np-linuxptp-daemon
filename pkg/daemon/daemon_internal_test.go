@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bigkevmcd/go-configparser"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/leap"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	"github.com/stretchr/testify/assert"
@@ -410,4 +411,115 @@ func TestReconcileRelatedProfiles(t *testing.T) {
 // Helper function to create string pointers
 func stringPointer(s string) *string {
 	return &s
+}
+
+// TestTBCTransitionCheck_LegacyPath tests the legacy path of tBCTransitionCheck
+func TestTBCTransitionCheck_LegacyPath(t *testing.T) {
+	// Create a real PluginManager
+	pmStruct := registerPlugins([]string{})
+	pm := &pmStruct
+
+	// Test case 1: Locked transition
+	t.Run("locked transition", func(t *testing.T) {
+		process := &ptpProcess{
+			tBCAttributes: tBCProcessAttributes{
+				trIfaceName: "ens4f0",
+			},
+			nodeProfile: ptpv1.PtpProfile{
+				Name: stringPointer("test-profile"),
+				PtpSettings: map[string]string{
+					"leadingInterface": "ens4f0",
+					"clockId[ens4f0]":  "123456789",
+				},
+			},
+			eventCh:              make(chan event.EventChannel, 1),
+			configName:           "test-config",
+			clockType:            event.BC,
+			tbcHasHardwareConfig: false, // Force legacy path
+		}
+
+		// Call with locked transition log
+		process.tBCTransitionCheck("ptp4l[123] port 1 (ens4f0): to SLAVE on MASTER_CLOCK_SELECTED", pm)
+
+		// Verify state changed to LOCKED
+		assert.Equal(t, event.PTP_LOCKED, process.lastTransitionResult)
+
+		// Verify event was sent
+		select {
+		case <-process.eventCh:
+			// Event was sent, good
+		default:
+			t.Error("Expected PTP event to be sent")
+		}
+	})
+
+	// Test case 2: Lost transition
+	t.Run("lost transition", func(t *testing.T) {
+		process := &ptpProcess{
+			tBCAttributes: tBCProcessAttributes{
+				trIfaceName: "ens4f0",
+			},
+			nodeProfile: ptpv1.PtpProfile{
+				Name: stringPointer("test-profile"),
+				PtpSettings: map[string]string{
+					"leadingInterface": "ens4f0",
+					"clockId[ens4f0]":  "123456789",
+				},
+			},
+			eventCh:              make(chan event.EventChannel, 1),
+			configName:           "test-config",
+			clockType:            event.BC,
+			tbcHasHardwareConfig: true, // Will still take legacy path due to nil detector
+		}
+
+		// Call with lost transition log
+		process.tBCTransitionCheck("ptp4l[123] port 1 (ens4f0): SLAVE to", pm)
+
+		// Verify state changed to FREERUN
+		assert.Equal(t, event.PTP_FREERUN, process.lastTransitionResult)
+
+		// Verify event was sent
+		select {
+		case <-process.eventCh:
+			// Event was sent, good
+		default:
+			t.Error("Expected PTP event to be sent")
+		}
+	})
+
+	// Test case 3: No transition
+	t.Run("no transition", func(t *testing.T) {
+		process := &ptpProcess{
+			tBCAttributes: tBCProcessAttributes{
+				trIfaceName: "ens4f0",
+			},
+			nodeProfile: ptpv1.PtpProfile{
+				Name: stringPointer("test-profile"),
+				PtpSettings: map[string]string{
+					"leadingInterface": "ens4f0",
+					"clockId[ens4f0]":  "123456789",
+				},
+			},
+			eventCh:              make(chan event.EventChannel, 1),
+			configName:           "test-config",
+			clockType:            event.BC,
+			tbcHasHardwareConfig: true,
+		}
+
+		initialState := process.lastTransitionResult
+
+		// Call with log that doesn't match any transition
+		process.tBCTransitionCheck("ptp4l[123] port 1 (ens4f0): some other message", pm)
+
+		// Verify state didn't change
+		assert.Equal(t, initialState, process.lastTransitionResult)
+
+		// Verify no event was sent
+		select {
+		case <-process.eventCh:
+			t.Error("Unexpected PTP event was sent")
+		default:
+			// No event sent, which is correct
+		}
+	})
 }

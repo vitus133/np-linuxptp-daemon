@@ -154,3 +154,10 @@ func (hcm *HardwareConfigManager) GetHardwareConfigCount() int {
 func (hcm *HardwareConfigManager) ClearHardwareConfigs() {
 	hcm.hardwareConfigs = make([]types.HardwareConfig, 0)
 }
+
+// GetPTPStateDetector returns a PTP state detector for processing PTP events
+// This allows external components to use the hardwareconfig-based PTP processing
+func (hcm *HardwareConfigManager) GetPTPStateDetector() *PTPStateDetector {
+	// Create a new PTPStateDetector with the current hardware configs
+	return NewPTPStateDetector(hcm)
+}

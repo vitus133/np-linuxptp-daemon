@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/golang/glog"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 )
 
@@ -97,8 +96,6 @@ type StateChangeHandler func(sourceName string, conditionType string, portName s
 // ProcessPTP4LLog processes a ptp4l log line and detects state changes (ultra-optimized version)
 // This bypasses the generic parser entirely for maximum performance
 func (psd *PTPStateDetector) ProcessPTP4LLog(logLine string, handler StateChangeHandler) {
-	glog.Infof("Processing PTP4L log: %s", logLine)
-
 	// Ultra-fast direct regex extraction - bypasses entire parser overhead
 	portName, event, isStateChange := psd.extractPTP4LStateChangeDirect(logLine)
 	if !isStateChange {
@@ -106,11 +103,8 @@ func (psd *PTPStateDetector) ProcessPTP4LLog(logLine string, handler StateChange
 		return
 	}
 
-	glog.Infof("Direct regex extracted: port=%s, event=%s", portName, event)
-
 	// Check if this port is monitored by any hardware config (O(1) lookup)
 	if portName == "" {
-		glog.Infof("No interface name in PTP event")
 		return
 	}
 
@@ -134,7 +128,6 @@ func (psd *PTPStateDetector) ProcessPTP4LLog(logLine string, handler StateChange
 
 	// Call handler for each source that monitors this port
 	for _, sourceName := range sources {
-		glog.Infof("Detected %s condition for port %s in source %s", conditionType, portName, sourceName)
 		if handler != nil {
 			handler(sourceName, conditionType, portName)
 		}
@@ -147,22 +140,11 @@ func (psd *PTPStateDetector) determineConditionTypeOptimized(event string) strin
 
 	// Check for locked conditions using compiled regex
 	if psd.lockedRegex.MatchString(eventLower) {
-		// Ensure it's not a "slave to slave" transition
-		if !strings.Contains(eventLower, "slave to slave") {
-			return "locked"
-		}
+		return "locked"
 	}
 
 	// Check for lost conditions using compiled regex
 	if psd.lostRegex.MatchString(eventLower) {
-		// Exclude "slave to slave" transitions from lost conditions
-		if strings.Contains(eventLower, "slave to slave") {
-			return ""
-		}
-		// Don't consider MASTER to MASTER transitions as lost even with timeout
-		if strings.Contains(eventLower, "master to master") {
-			return ""
-		}
 		return "lost"
 	}
 
@@ -190,4 +172,71 @@ func (psd *PTPStateDetector) GetBehaviorRules() []types.Condition {
 	}
 
 	return allConditions
+}
+
+// TBCTransitionHandler handles T-BC transition events
+// conditionType: "locked" (successful sync) or "lost" (sync lost)
+type TBCTransitionHandler func(conditionType string, portName string)
+
+// ProcessTBCTransition processes a T-BC transition event using hardware config behavior rules
+// This replaces the simple string matching with intelligent behavior rule processing
+func (psd *PTPStateDetector) ProcessTBCTransition(logLine string, handler TBCTransitionHandler) {
+	// Extract port name and event using the optimized regex
+	portName, event, isStateChange := psd.extractPTP4LStateChangeDirect(logLine)
+	if !isStateChange {
+		return
+	}
+
+	// Check if this port is monitored by any hardware config
+	if !psd.monitoredPorts[portName] {
+		return
+	}
+
+	// Get sources that monitor this port
+	sources, exists := psd.portToSources[portName]
+	if !exists || len(sources) == 0 {
+		return
+	}
+
+	// Determine the condition type based on the event
+	conditionType := psd.determineTBCConditionType(event)
+	if conditionType == "" {
+		return
+	}
+
+	// Call handler for each source that monitors this port
+	for range sources {
+		if handler != nil {
+			handler(conditionType, portName)
+		}
+	}
+}
+
+// determineTBCConditionType determines T-BC specific condition types from PTP events
+// Uses general regex first, then string matching only if regex matches (single evaluation)
+func (psd *PTPStateDetector) determineTBCConditionType(event string) string {
+	eventLower := strings.ToLower(event)
+
+	// First check general locked pattern (single regex evaluation)
+	if psd.lockedRegex.MatchString(eventLower) {
+		// If general locked pattern matches, check if it's T-BC specific
+		if strings.Contains(eventLower, "master_clock_selected") {
+			return "locked" // T-BC specific: "to slave on master_clock_selected"
+		}
+		// General locked pattern matched but not T-BC specific - ignore for T-BC
+		return ""
+	}
+
+	// First check general lost pattern (single regex evaluation)
+	if psd.lostRegex.MatchString(eventLower) {
+		// If general lost pattern matches, check if it's T-BC specific
+		if strings.Contains(eventLower, "announce_receipt_timeout_expires") ||
+			strings.Contains(eventLower, "slave to") {
+			return "lost" // T-BC specific lost conditions
+		}
+		// General lost pattern matched but not T-BC specific - ignore for T-BC
+		return ""
+	}
+
+	return "" // No T-BC condition detected
 }

@@ -200,6 +200,13 @@ type ptpProcess struct {
 	hasCollectedMetrics   bool
 	tBCAttributes         tBCProcessAttributes
 	GrandmasterClockClass uint8
+	daemon                *Daemon // Reference to daemon for hardwareconfig access
+
+	// Cached resources for T-BC processing (called 16x/second)
+	tbcHasHardwareConfig bool                             // Cached hardwareconfig availability
+	tbcStateDetector     *hardwareconfig.PTPStateDetector // Cached PTP state detector instance
+	portLockedRegex      *regexp.Regexp                   // Pre-compiled regex for T-BC locked transitions
+	portLostRegex        *regexp.Regexp                   // Pre-compiled regex for T-BC lost transitions
 }
 
 func (p *ptpProcess) Stopped() bool {
@@ -720,12 +727,16 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			logParser:            getParser(pProcess),
 			tBCAttributes:        tBCProcessAttributes{controlledPortsConfigFile: controlledConfigFile},
 			lastTransitionResult: event.PTP_NOTSET,
+			daemon:               dn, // Reference to daemon for hardwareconfig access
 		}
 
 		if pProcess == ptp4lProcessName {
 			if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
 				dprocess.tBCAttributes.trIfaceName = port
 			}
+
+			// Prepare cached resources for T-BC processing
+			dprocess.prepareTBCResources()
 		}
 		// TODO HARDWARE PLUGIN for e810
 		if pProcess == ts2phcProcessName { //& if the x plugin is enabled
@@ -950,16 +961,63 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	}
 }
 
+// prepareTBCResources prepares cached resources for T-BC processing
+// This method caches expensive operations that would otherwise be repeated 16x/second
+func (p *ptpProcess) prepareTBCResources() {
+	// Cache hardwareconfig availability (expensive lookup)
+	if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
+		p.tbcHasHardwareConfig = p.daemon.hardwareConfigManager.HasHardwareConfigForProfile(&p.nodeProfile)
+	}
+
+	// Cache PTP state detector instance (expensive creation)
+	if p.tbcHasHardwareConfig {
+		p.tbcStateDetector = p.daemon.hardwareConfigManager.GetPTPStateDetector()
+	}
+
+	// Pre-compile separate regex patterns for T-BC locked and lost conditions (expensive compilation)
+	p.portLockedRegex = regexp.MustCompile(`(?i)to slave on master_clock_selected`)
+	p.portLostRegex = regexp.MustCompile(`(?i)(to master on announce_receipt_timeout_expires|slave to)`)
+}
+
+// tBCTransitionCheck performs ultra-fast T-BC transition detection (called 16x/second)
+// Uses cached values and optimized processing to minimize performance impact
 func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
+	// Use cached hardwareconfig availability (no expensive lookups)
+	if p.tbcHasHardwareConfig && p.tbcStateDetector != nil {
+		// Hardwareconfig path: Use cached PTP state detector
+		p.processTBCTransitionHardwareConfig(output, pm)
+	} else {
+		// Legacy path: Use optimized string matching
+		p.processTBCTransitionLegacy(output, pm)
+	}
+}
+
+// processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig (optimized)
+func (p *ptpProcess) processTBCTransitionHardwareConfig(output string, pm *PluginManager) {
+	// Use cached PTP state detector (no instance creation overhead)
+	p.tbcStateDetector.ProcessTBCTransition(output, func(conditionType string, portName string) {
+		switch conditionType {
+		case "normal":
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+			p.lastTransitionResult = event.PTP_LOCKED
+			p.sendPtp4lEvent()
+		case "holdover":
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+			p.lastTransitionResult = event.PTP_FREERUN
+			p.sendPtp4lEvent()
+		}
+	})
+}
+
+// processTBCTransitionLegacy is the original implementation as ultimate fallback
+func (p *ptpProcess) processTBCTransitionLegacy(output string, pm *PluginManager) {
 	if strings.Contains(output, p.tBCAttributes.trIfaceName) {
 		if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
-			glog.Info("T-BC MOVE TO NORMAL")
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
 			p.lastTransitionResult = event.PTP_LOCKED
 			p.sendPtp4lEvent()
 		} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
 			strings.Contains(output, "SLAVE to") {
-			glog.Info("T-BC MOVE TO HOLDOVER")
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
 			p.lastTransitionResult = event.PTP_FREERUN
 			p.sendPtp4lEvent()
