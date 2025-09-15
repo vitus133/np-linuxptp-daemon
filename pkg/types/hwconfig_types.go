@@ -182,8 +182,20 @@ type SourceState struct {
 	ConditionType string `json:"conditionType"`
 }
 
-// DesiredState defines the desired pin and connector settings that are applied when a condition is triggered.
+// DesiredState defines the desired configuration that is applied when a condition is triggered.
+// It supports either DPLL pin configurations OR sysFS-based Ethernet subsystem configurations.
 type DesiredState struct {
+	// DPLL defines DPLL pin configurations for the subsystem
+	DPLL *DPLLDesiredState `json:"dpll,omitempty"`
+
+	// SysFS defines a sysFS-based configuration for the Ethernet part of the subsystem.
+	// This configuration is applied by writing a value to a sysFS path, often including interface names
+	// that can be obtained from PTP sources' ptpTimeReceivers field.
+	SysFS *SysFSDesiredState `json:"sysfs,omitempty"`
+}
+
+// DPLLDesiredState defines the desired DPLL pin configuration for a subsystem.
+type DPLLDesiredState struct {
 	// ClockID is the subsystem clock ID (decimal or hex format)
 	ClockID string `json:"clockId,omitempty"`
 
@@ -198,6 +210,26 @@ type DesiredState struct {
 
 	// PPS defines the desired state for the Pulse Per Second pin
 	PPS *PinState `json:"pps,omitempty"`
+}
+
+// SysFSDesiredState defines a sysFS-based configuration for Ethernet subsystems.
+// It specifies a path in sysFS and the value to write to it, with support for interface name templating.
+type SysFSDesiredState struct {
+	// Path is the sysFS path where the value should be written.
+	// It supports templating with interface names using the format: /sys/class/net/{interface}/...
+	// The {interface} placeholder will be replaced with actual interface names from PTP sources.
+	Path string `json:"path"`
+
+	// Value is the value to write to the sysFS path
+	Value string `json:"value"`
+
+	// SourceName specifies which source to use for obtaining interface names.
+	// If specified, the interface names will be taken from the PTP source's ptpTimeReceivers field.
+	// If not specified, all available PTP sources will be considered for interface name resolution.
+	SourceName string `json:"sourceName,omitempty"`
+
+	// Description provides optional context about this sysFS configuration
+	Description string `json:"description,omitempty"`
 }
 
 // PinState represents the desired state of a pin.
@@ -402,11 +434,16 @@ func (cc *ClockChain) ResolveClockAliases() error {
 	// Resolve desired state clock IDs
 	for ci := range cc.Behavior.Conditions {
 		for di := range cc.Behavior.Conditions[ci].DesiredStates {
-			resolved, err := resolveClockIDValue(cc.Behavior.Conditions[ci].DesiredStates[di].ClockID, aliasToClock)
-			if err != nil {
-				return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].clockId: %w", ci, di, err)
+			desiredState := &cc.Behavior.Conditions[ci].DesiredStates[di]
+
+			// Resolve DPLL clock ID if present
+			if desiredState.DPLL != nil && desiredState.DPLL.ClockID != "" {
+				resolved, err := resolveClockIDValue(desiredState.DPLL.ClockID, aliasToClock)
+				if err != nil {
+					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId: %w", ci, di, err)
+				}
+				desiredState.DPLL.ClockID = resolved
 			}
-			cc.Behavior.Conditions[ci].DesiredStates[di].ClockID = resolved
 		}
 	}
 
@@ -568,9 +605,10 @@ func (cc *ClockChain) Validate() error {
 
 			// Validate desired states
 			for _, desiredState := range condition.DesiredStates {
-				if desiredState.ClockID != "" {
-					if err := ValidateClockID(desiredState.ClockID); err != nil {
-						return fmt.Errorf("invalid clock ID in desired state: %w", err)
+				// Validate DPLL clock ID if present
+				if desiredState.DPLL != nil && desiredState.DPLL.ClockID != "" {
+					if err := ValidateClockID(desiredState.DPLL.ClockID); err != nil {
+						return fmt.Errorf("invalid clock ID in DPLL desired state: %w", err)
 					}
 				}
 			}

@@ -4,117 +4,121 @@ metadata:
   name: test
   namespace: openshift-ptp
 spec:
-  relatedPtpProfileName: 01-tbc-tr
   profile:
-    name: "tbc"
     clockChain:
+      behavior:
+        conditions:
+        - desiredStates:
+          - dpll:
+              boardLabel: GNSS_1PPS
+              clockId: Leader
+              eec:
+                priority: 255
+              pps:
+                priority: 255
+          - dpll:
+              boardLabel: GNSS_1PPS
+              clockId: Follower
+              eec:
+                priority: 255
+              pps:
+                priority: 255
+          - dpll:
+              boardLabel: CVL_SDP20
+              clockId: Leader
+              eec:
+                priority: 255
+              pps:
+                priority: 255
+          - dpll:
+              boardLabel: CVL_SDP21
+              clockId: Leader
+              eec:
+                state: disconnected
+              pps:
+                state: disconnected
+          name: Initialize T-BC
+          sources:
+          - conditionType: init
+            sourceName: PTP
+        - desiredStates:
+          - dpll:
+              boardLabel: CVL_SDP22
+              clockId: Leader
+              eec:
+                priority: 255
+              pps:
+                priority: 0
+          - dpll:
+              boardLabel: CVL_SDP23
+              clockId: Leader
+              eec:
+                state: disconnected
+              pps:
+                state: disconnected
+          name: PTP Source Active
+          sources:
+          - conditionType: locked
+            sourceName: PTP
+        - desiredStates:
+          - dpll:
+              boardLabel: CVL_SDP22
+              clockId: Leader
+              eec:
+                priority: 255
+              pps:
+                priority: 255
+          - dpll:
+              boardLabel: CVL_SDP23
+              clockId: Leader
+              eec:
+                state: connected
+              pps:
+                state: connected
+          name: PTP Source Lost - Leader Holdover
+          sources:
+          - conditionType: lost
+            sourceName: PTP
+        sources:
+        - boardLabel: CVL_SDP22
+          clockId: Leader
+          name: PTP
+          ptpTimeReceivers:
+          - ens4f1
+          sourceType: ptpTimeReceiver
       commonDefinitions:
         clockIdentifiers:
-        - alias: "Leader"
+        - alias: Leader
           clockId: "0x507c6fffff1fb1b8"
-        - alias: "Follower"
+        - alias: Follower
           clockId: "0x507c6fffff1fb580"
-      #   eSyncDefinitions:
-      #   - name: "10MHz-1PPS"
-      #     esyncConfig:
-      #       transferFrequency: 10000000
-      #       embeddedSyncFrequency: 1
-      #       dutyCyclePct: 25
       structure:
-      - name: TGM WPC leader with dual esync outputs
-        hardwarePlugin: "e810"
-        ethernet:
-        - ports: ["ens4f0","ens4f1"]
-        dpll: 
-          clockId: "Leader"
+      - dpll:
+          clockId: Leader
           phaseInputs:
             CVL_SDP22:
-              frequency: 1
               description: PTP time receiver input
+              frequency: 1
           phaseOutputs:
             REF-SMA1:
-              # esyncConfigName: "10MHz-1PPS"
-              connector: SMA1  
-              # phaseAdjustment:
-              #   internal: 2323
-              #   external: 12000
+              connector: SMA1
               description: Output to the follower
-      - name: WPC followe1 through SMA1 from SMA1
-        hardwarePlugin: "e810"
         ethernet:
-        - ports: ["ens8f0"]
-        dpll:
-          clockId: "Follower"
+        - ports:
+          - ens4f0
+          - ens4f1
+        hardwarePlugin: e810
+        name: TGM WPC leader with dual esync outputs
+      - dpll:
+          clockId: Follower
           phaseInputs:
             SMA1:
-              # esyncConfigName: "10MHz-1PPS"
               connector: SMA1
               description: Input from the leader
-      behavior:
-        sources:
-        - name: PTP
-          clockId: "Leader"
-          sourceType: "ptpTimeReceiver"
-          boardLabel: "CVL_SDP22"
-          ptpTimeReceivers:
-          - "ens4f1"
-        conditions:
-        - name: "Initialize T-BC"
-          sources: []
-          desiredStates:
-          - clockId: "Leader"
-            boardLabel: "GNSS_1PPS"
-            eec:
-              priority: 255
-            pps:
-              priority: 255
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP20"
-            eec:
-              priority: 255
-            pps:
-              priority: 255
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP21"
-            eec:
-              state: "disconnected"
-            pps:
-              state: "disconnected"
-        - name: "PTP Source Active"
-          sources:
-          - sourceName: "PTP"
-            conditionType: "locked"
-          desiredStates:
-          # PTP source is active - enable leader input, disable output
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP22"
-            eec:
-              priority: 255
-            pps:
-              priority: 0
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP23"
-            eec:
-              state: "disconnected"
-            pps:
-              state: "disconnected"
-
-        - name: "PTP Source Lost - Leader Holdover"
-          sources:
-          - sourceName: "PTP"
-            conditionType: "lost"
-          desiredStates:
-          # PTP lost - leader enters holdover
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP22"
-            eec:
-              priority: 255
-            pps:
-              priority: 255
-          - clockId: "Leader"
-            boardLabel: "CVL_SDP23"
-            eec:
-              state: "connected"
-            pps:
-              state: "connected"
-
+        ethernet:
+        - ports:
+          - ens8f0
+        hardwarePlugin: e810
+        name: WPC followe1 through SMA1 from SMA1
+    name: tbc
+  relatedPtpProfileName: 01-tbc-tr
