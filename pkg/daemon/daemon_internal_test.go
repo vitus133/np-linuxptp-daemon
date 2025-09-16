@@ -632,11 +632,6 @@ func (m *mockTBCStateDetector) ProcessTBCTransition(logLine string, handler func
 	}
 }
 
-// Implement other required methods to make it a complete mock
-func (m *mockTBCStateDetector) ProcessPTP4LLog(logLine string, handler func(string, string, string)) {
-	// Stub implementation - not used in this test
-}
-
 // TestProcessTBCTransitionHardwareConfig tests the hardware config transition processing function
 // This test focuses on the function's core logic: handling different condition types from the callback
 func TestProcessTBCTransitionHardwareConfig(t *testing.T) {

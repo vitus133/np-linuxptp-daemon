@@ -994,19 +994,19 @@ func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
 
 // processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig (optimized)
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string, pm *PluginManager) {
-	// Use cached PTP state detector (no instance creation overhead)
-	p.tbcStateDetector.ProcessTBCTransition(output, func(conditionType string, portName string) {
-		switch conditionType {
-		case "locked":
-			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-			p.lastTransitionResult = event.PTP_LOCKED
-			p.sendPtp4lEvent()
-		case "lost":
-			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-			p.lastTransitionResult = event.PTP_FREERUN
-			p.sendPtp4lEvent()
-		}
-	})
+	// Use the new DetectStateChange function for optimal performance
+	conditionType := p.tbcStateDetector.DetectStateChange(output)
+
+	switch conditionType {
+	case "locked":
+		pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+		p.lastTransitionResult = event.PTP_LOCKED
+		p.sendPtp4lEvent()
+	case "lost":
+		pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+		p.lastTransitionResult = event.PTP_FREERUN
+		p.sendPtp4lEvent()
+	}
 }
 
 // processTBCTransitionLegacy is the original implementation as ultimate fallback
