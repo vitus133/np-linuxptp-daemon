@@ -300,7 +300,7 @@ func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types
 	}
 
 	// Resolve interface names from PTP sources if path contains templating
-	resolvedPaths, err := hcm.resolveInterfaceNamesInPath(sysfSDesiredState, clockChain)
+	resolvedPaths, err := hcm.resolveSysFSPath(sysfSDesiredState, clockChain)
 	if err != nil {
 		return fmt.Errorf("failed to resolve interface names in path: %w", err)
 	}
@@ -316,8 +316,8 @@ func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types
 	return nil
 }
 
-// resolveInterfaceNamesInPath resolves interface name templating in sysFS paths
-func (hcm *HardwareConfigManager) resolveInterfaceNamesInPath(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain) ([]string, error) {
+// resolveSysFSPath resolves interface name templating in sysFS paths
+func (hcm *HardwareConfigManager) resolveSysFSPath(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain) ([]string, error) {
 	path := sysfSDesiredState.Path
 
 	// If path doesn't contain {interface} placeholder, return as-is
@@ -326,53 +326,52 @@ func (hcm *HardwareConfigManager) resolveInterfaceNamesInPath(sysfSDesiredState 
 	}
 
 	// Get interface names from PTP sources
-	interfaceNames, err := hcm.getInterfaceNamesFromSources(sysfSDesiredState.SourceName, clockChain)
+	interfaceName, err := hcm.getInterfaceNameFromSources(sysfSDesiredState.SourceName, clockChain)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get interface names: %w", err)
 	}
 
-	if len(interfaceNames) == 0 {
+	if interfaceName == nil {
 		return nil, fmt.Errorf("no interface names found for path templating")
 	}
 
-	// Replace {interface} placeholder with each interface name
-	var resolvedPaths []string
-	for _, interfaceName := range interfaceNames {
-		resolvedPath := strings.ReplaceAll(path, "{interface}", interfaceName)
-		resolvedPaths = append(resolvedPaths, resolvedPath)
-	}
+	resolvedPath := strings.ReplaceAll(path, "{interface}", *interfaceName)
+	resolvedPaths := []string{resolvedPath}
 
 	return resolvedPaths, nil
 }
 
-// getInterfaceNamesFromSources extracts interface names from PTP sources
-func (hcm *HardwareConfigManager) getInterfaceNamesFromSources(sourceName string, clockChain *types.ClockChain) ([]string, error) {
+// getInterfaceNameFromSources extracts the default interface name from the structure section
+// based on the clock ID of the specified source. The default interface is ethernet.ports[0]
+// of the corresponding subsystem in the structure section.
+func (hcm *HardwareConfigManager) getInterfaceNameFromSources(sourceName string, clockChain *types.ClockChain) (*string, error) {
 	if clockChain.Behavior == nil {
 		return nil, fmt.Errorf("no behavior section found in clock chain")
 	}
-
-	var interfaceNames []string
-
+	upstreamPort := ""
+	// Find the corresponding subsystem in the structure section using the resolved clock ID
+	if clockChain.Structure == nil {
+		return nil, fmt.Errorf("no structure section found in clock chain")
+	}
 	for _, source := range clockChain.Behavior.Sources {
-		// If sourceName is specified, only use that specific source
-		if sourceName != "" && source.Name != sourceName {
-			continue
+		if source.Name == sourceName {
+			upstreamPort = source.PTPTimeReceivers[0]
+			break
 		}
-
-		// Only consider PTP time receiver sources
-		if source.SourceType == "ptpTimeReceiver" {
-			interfaceNames = append(interfaceNames, source.PTPTimeReceivers...)
+	}
+	for _, subsystem := range clockChain.Structure {
+		if len(subsystem.Ethernet) > 0 && len(subsystem.Ethernet[0].Ports) > 0 {
+			for _, eth := range subsystem.Ethernet {
+				for _, port := range eth.Ports {
+					if port == upstreamPort {
+						return &eth.Ports[0], nil
+					}
+				}
+			}
 		}
 	}
 
-	if len(interfaceNames) == 0 {
-		if sourceName != "" {
-			return nil, fmt.Errorf("no PTP time receivers found for source '%s'", sourceName)
-		}
-		return nil, fmt.Errorf("no PTP time receivers found in any source")
-	}
-
-	return interfaceNames, nil
+	return nil, fmt.Errorf("no default port found for port %s", sourceName)
 }
 
 // writeSysFSValue writes a value to a sysFS path

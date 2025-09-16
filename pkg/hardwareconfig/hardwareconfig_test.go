@@ -335,4 +335,171 @@ func TestNewPTPStateDetector(t *testing.T) {
 	assert.NotNil(t, psd.hcm)
 }
 
-// TestPTPStateDetectorRegexFormats tests the regex pattern directly with both timestamp formats
+// TestApplyConditionDesiredStatesWithRealData tests applyConditionDesiredStates using actual hardware config YAML data
+func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
+	// Load the real hardware configuration from YAML
+	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
+	if err != nil {
+		t.Fatalf("Failed to load hardware config: %v", err)
+	}
+
+	// Create a HardwareConfigManager
+	hcm := &HardwareConfigManager{
+		hardwareConfigs: []types.HardwareConfig{*hwConfig},
+	}
+
+	// Extract the clock chain from the loaded config
+	clockChain := hwConfig.Spec.Profile.ClockChain
+	profileName := *hwConfig.Spec.Profile.Name
+
+	t.Logf("Testing with real hardware config: %s", hwConfig.ObjectMeta.Name)
+	t.Logf("Profile: %s", profileName)
+	t.Logf("Clock chain has %d conditions", len(clockChain.Behavior.Conditions))
+
+	// Test each condition from the real hardware config
+	for i, condition := range clockChain.Behavior.Conditions {
+		t.Run(fmt.Sprintf("condition_%d_%s", i, condition.Name), func(t *testing.T) {
+			t.Logf("Testing condition: %s", condition.Name)
+			t.Logf("  Sources: %d", len(condition.Sources))
+			t.Logf("  Desired states: %d", len(condition.DesiredStates))
+
+			// Log details about the condition
+			for j, source := range condition.Sources {
+				t.Logf("    Source %d: %s (%s)", j+1, source.SourceName, source.ConditionType)
+			}
+
+			for j, desiredState := range condition.DesiredStates {
+				if desiredState.DPLL != nil {
+					t.Logf("    Desired state %d: DPLL - Clock: %s, Board: %s",
+						j+1, desiredState.DPLL.ClockID, desiredState.DPLL.BoardLabel)
+					if desiredState.DPLL.EEC != nil {
+						if desiredState.DPLL.EEC.Priority != nil {
+							t.Logf("      EEC Priority: %d", *desiredState.DPLL.EEC.Priority)
+						}
+						if desiredState.DPLL.EEC.State != "" {
+							t.Logf("      EEC State: %s", desiredState.DPLL.EEC.State)
+						}
+					}
+					if desiredState.DPLL.PPS != nil {
+						if desiredState.DPLL.PPS.Priority != nil {
+							t.Logf("      PPS Priority: %d", *desiredState.DPLL.PPS.Priority)
+						}
+						if desiredState.DPLL.PPS.State != "" {
+							t.Logf("      PPS State: %s", desiredState.DPLL.PPS.State)
+						}
+					}
+				}
+				if desiredState.SysFS != nil {
+					t.Logf("    Desired state %d: SysFS - Path: %s, Value: %s",
+						j+1, desiredState.SysFS.Path, desiredState.SysFS.Value)
+					if desiredState.SysFS.SourceName != "" {
+						t.Logf("      Source: %s", desiredState.SysFS.SourceName)
+					}
+				}
+			}
+
+			// Apply the condition's desired states
+			err := hcm.applyConditionDesiredStates(condition, profileName, clockChain)
+
+			// All conditions should apply successfully since the YAML is well-formed
+			if err != nil {
+				t.Errorf("Failed to apply condition '%s': %v", condition.Name, err)
+			} else {
+				t.Logf("✅ Successfully applied condition '%s' with %d desired states",
+					condition.Name, len(condition.DesiredStates))
+			}
+		})
+	}
+
+	// Test specific conditions by name
+	testCases := []struct {
+		conditionName  string
+		expectedStates int
+		description    string
+	}{
+		{
+			conditionName:  "Initialize T-BC",
+			expectedStates: 5,
+			description:    "Should have initialization states for GNSS and CVL pins plus sysFS config",
+		},
+		{
+			conditionName:  "PTP Source Active",
+			expectedStates: 2,
+			description:    "Should have active configuration for CVL pins",
+		},
+		{
+			conditionName:  "PTP Source Lost - Leader Holdover",
+			expectedStates: 2,
+			description:    "Should have holdover configuration for CVL pins",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("validate_%s", strings.ReplaceAll(tc.conditionName, " ", "_")), func(t *testing.T) {
+			// Find the condition by name
+			var targetCondition *types.Condition
+			for _, condition := range clockChain.Behavior.Conditions {
+				if condition.Name == tc.conditionName {
+					targetCondition = &condition
+					break
+				}
+			}
+
+			if targetCondition == nil {
+				t.Fatalf("Condition '%s' not found in hardware config", tc.conditionName)
+			}
+
+			// Validate the expected number of desired states
+			if len(targetCondition.DesiredStates) != tc.expectedStates {
+				t.Errorf("Expected %d desired states for '%s', got %d",
+					tc.expectedStates, tc.conditionName, len(targetCondition.DesiredStates))
+			}
+
+			t.Logf("✅ %s", tc.description)
+			t.Logf("   Found %d desired states as expected", len(targetCondition.DesiredStates))
+		})
+	}
+
+	// Validate the hardware config structure
+	t.Run("validate_hardware_config_structure", func(t *testing.T) {
+		// Check that we have the expected sources
+		sources := clockChain.Behavior.Sources
+		if len(sources) != 1 {
+			t.Errorf("Expected 1 source, got %d", len(sources))
+		} else {
+			source := sources[0]
+			if source.Name != "PTP" {
+				t.Errorf("Expected source name 'PTP', got '%s'", source.Name)
+			}
+			if source.SourceType != "ptpTimeReceiver" {
+				t.Errorf("Expected source type 'ptpTimeReceiver', got '%s'", source.SourceType)
+			}
+			if len(source.PTPTimeReceivers) != 1 || source.PTPTimeReceivers[0] != "ens4f1" {
+				t.Errorf("Expected PTP time receiver 'ens4f1', got %v", source.PTPTimeReceivers)
+			}
+			t.Logf("✅ Source configuration validated: %s (%s) with interface %s",
+				source.Name, source.SourceType, source.PTPTimeReceivers[0])
+		}
+
+		// Check clock identifiers
+		clockIds := clockChain.CommonDefinitions.ClockIdentifiers
+		if len(clockIds) != 2 {
+			t.Errorf("Expected 2 clock identifiers, got %d", len(clockIds))
+		} else {
+			expectedClockIds := map[string]string{
+				"Leader":   "0x507c6fffff1fb1b8",
+				"Follower": "0x507c6fffff1fb580",
+			}
+			for _, clockId := range clockIds {
+				expectedId, exists := expectedClockIds[clockId.Alias]
+				if !exists {
+					t.Errorf("Unexpected clock identifier alias: %s", clockId.Alias)
+				} else if clockId.ClockID != expectedId {
+					t.Errorf("Expected clock ID %s for %s, got %s", expectedId, clockId.Alias, clockId.ClockID)
+				} else {
+					t.Logf("✅ Clock identifier validated: %s -> %s", clockId.Alias, clockId.ClockID)
+				}
+			}
+		}
+	})
+}
