@@ -1,10 +1,10 @@
 package hardwareconfig
 
 import (
-	"regexp"
 	"strings"
 
-	"github.com/golang/glog"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 )
 
@@ -15,12 +15,9 @@ type PTPStateDetector struct {
 	// Performance optimizations - cached lookups
 	portToSources  map[string][]string // port -> list of source names that monitor it
 	monitoredPorts map[string]bool     // set of all monitored ports
-	lockedRegex    *regexp.Regexp      // compiled regex for locked transitions
-	lostRegex      *regexp.Regexp      // compiled regex for lost transitions
 
-	// Ultra-fast direct regex for extracting interface and event from PTP4L state change logs
-	// This bypasses the generic parser entirely for maximum performance
-	stateChangeRegex *regexp.Regexp // extracts port_name and event from state change logs
+	// PTP4L parser for robust log parsing
+	ptp4lExtractor parser.MetricsExtractor
 }
 
 // NewPTPStateDetector creates a new PTP state detector
@@ -30,15 +27,10 @@ func NewPTPStateDetector(hcm *HardwareConfigManager) *PTPStateDetector {
 	}
 
 	// Initialize caches and compile regexes for performance
-	psd.buildCachesAndRegexes()
+	psd.buildCaches()
 
-	// Create ultra-fast regex for direct PTP4L state change parsing
-	// This regex extracts the port name and event from PTP4L state change logs
-	// Universal pattern handles both formats:
-	// 1. [ptp4l.config:level] port id (port_name): event_text
-	// 2. ptp4l[timestamp]: [ptp4l.config:level] port id (port_name): event_text
-	psd.stateChangeRegex = regexp.MustCompile(`^(?:ptp4l\[[^\]]+\]:\s+)?\[ptp4l[^\]]*\]\s+port\s+\d+\s*\(([^)]+)\):\s+(.+)$`)
-	glog.Infof("stateChangeRegex: %v", psd.stateChangeRegex)
+	// Initialize PTP4L parser for robust log parsing
+	psd.ptp4lExtractor = parser.NewPTP4LExtractor()
 
 	return psd
 }
@@ -48,71 +40,56 @@ func NewPTPStateDetector(hcm *HardwareConfigManager) *PTPStateDetector {
 // Only returns a result if the interface is in the monitored sources list
 // TODO: replace by pmc  state monitor
 func (psd *PTPStateDetector) DetectStateChange(logLine string) string {
-	// Step 1: Simple string-based parsing to avoid regex issues
-	// Look for PTP4L log pattern: "] port N (interface): event"
+	// Use the robust PTP4L parser to extract event information
+	_, event, err := psd.ptp4lExtractor.Extract(logLine)
+	if err != nil || event == nil {
+		return "" // Not a PTP4L event log line or parsing error
+	}
 
-	// Find the port pattern
+	portName := psd.extractPortName(logLine)
+	if portName == "" {
+		return "" // No interface name found
+	}
+
+	if !psd.monitoredPorts[portName] {
+		return "" // Port not in monitored sources, skip
+	}
+
+	switch event.Role {
+	case constants.PortRoleSlave:
+		return "locked"
+	default:
+		return "lost"
+	}
+}
+
+// extractPortName extracts the port name from a PTP4L log line using simple string parsing
+func (psd *PTPStateDetector) extractPortName(logLine string) string {
+	// Find the port pattern "] port N (interface):"
 	portIndex := strings.Index(logLine, "] port ")
 	if portIndex == -1 {
-		return "" // Not a PTP4L state change log line
+		return ""
 	}
 
 	// Find the interface name in parentheses after "port N"
 	parenStart := strings.Index(logLine[portIndex:], "(")
 	if parenStart == -1 {
-		return "" // No interface name found
+		return ""
 	}
 	parenStart += portIndex
 
 	parenEnd := strings.Index(logLine[parenStart:], ")")
 	if parenEnd == -1 {
-		return "" // No closing parenthesis found
+		return ""
 	}
 	parenEnd += parenStart
 
-	// Extract port name
-	portName := logLine[parenStart+1 : parenEnd]
-	if portName == "" {
-		return "" // Empty port name
-	}
-
-	// Find the event part after ": "
-	colonIndex := strings.Index(logLine[parenEnd:], ": ")
-	if colonIndex == -1 {
-		return "" // No event separator found
-	}
-	colonIndex += parenEnd
-
-	event := logLine[colonIndex+2:] // Skip ": "
-	if event == "" {
-		return "" // Empty event
-	}
-
-	// Step 2: Fast O(1) check if port is monitored (single map lookup)
-	if !psd.monitoredPorts[portName] {
-		return "" // Port not in monitored sources, skip
-	}
-
-	// Step 3: Simple string-based condition detection
-	eventLower := strings.ToLower(event)
-
-	// Check for locked conditions: "to slave on master_clock_selected"
-	if strings.Contains(eventLower, "to slave") && strings.Contains(eventLower, "master_clock_selected") {
-		return "locked"
-	}
-
-	// Check for lost conditions: various failure patterns
-	if strings.Contains(eventLower, "slave to") ||
-		strings.Contains(eventLower, "fault") ||
-		strings.Contains(eventLower, "timeout") {
-		return "lost"
-	}
-
-	return "" // No relevant condition detected
+	// Extract and return port name
+	return logLine[parenStart+1 : parenEnd]
 }
 
-// buildCachesAndRegexes builds performance caches and compiles regexes for fast lookups
-func (psd *PTPStateDetector) buildCachesAndRegexes() {
+// buildCaches builds performance caches and compiles regexes for fast lookups
+func (psd *PTPStateDetector) buildCaches() {
 	// Initialize maps
 	psd.portToSources = make(map[string][]string)
 	psd.monitoredPorts = make(map[string]bool)
@@ -134,17 +111,6 @@ func (psd *PTPStateDetector) buildCachesAndRegexes() {
 		}
 	}
 
-	// Compile regexes for state transition detection
-	// Locked conditions: "to slave" transition
-	psd.lockedRegex = regexp.MustCompile(`(?i)to slave`)
-
-	// Lost conditions: various slave state losses
-	psd.lostRegex = regexp.MustCompile(`(?i)(slave to|fault_detected|announce_receipt_timeout|sync_receipt_timeout|slave.*(?:fault|timeout|disconnected))`)
-}
-
-// rebuildCaches rebuilds the performance caches when hardware configs change
-func (psd *PTPStateDetector) rebuildCaches() {
-	psd.buildCachesAndRegexes()
 }
 
 // GetMonitoredPorts returns all ports that are being monitored by hardware configs (optimized)

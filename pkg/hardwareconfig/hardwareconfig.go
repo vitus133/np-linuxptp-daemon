@@ -81,7 +81,7 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfigWithNotification(hwConfigs
 		return err
 	}
 	if psd != nil {
-		psd.rebuildCaches()
+		psd.buildCaches()
 	}
 	return nil
 }

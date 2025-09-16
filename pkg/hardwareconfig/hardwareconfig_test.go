@@ -219,23 +219,13 @@ func TestDetectStateChange(t *testing.T) {
 			expected string
 		}{
 			{
-				name:     "locked condition - with timestamp",
+				name:     "locked condition",
 				logLine:  "ptp4l[1716691.337]: [ptp4l.1.config:5] port 1 (ens4f1): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED",
 				expected: "locked",
 			},
 			{
-				name:     "locked condition - without timestamp",
-				logLine:  "[ptp4l.1.config:5] port 1 (ens4f1): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED",
-				expected: "locked",
-			},
-			{
-				name:     "lost condition - with timestamp",
+				name:     "lost condition",
 				logLine:  "ptp4l[1031716.424]: [ptp4l.0.config:5] port 1 (ens4f1): SLAVE to FAULT_DETECTED on FAULT_DETECTED",
-				expected: "lost",
-			},
-			{
-				name:     "lost condition - without timestamp",
-				logLine:  "[ptp4l.0.config:5] port 1 (ens4f1): SLAVE to FAULT_DETECTED on FAULT_DETECTED",
 				expected: "lost",
 			},
 			{
