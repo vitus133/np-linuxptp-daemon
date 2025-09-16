@@ -103,9 +103,8 @@ func (psd *PTPStateDetector) DetectStateChange(logLine string) string {
 
 	// Check for lost conditions: various failure patterns
 	if strings.Contains(eventLower, "slave to") ||
-		strings.Contains(eventLower, "fault_detected") ||
-		strings.Contains(eventLower, "announce_receipt_timeout") ||
-		strings.Contains(eventLower, "sync_receipt_timeout") {
+		strings.Contains(eventLower, "fault") ||
+		strings.Contains(eventLower, "timeout") {
 		return "lost"
 	}
 
