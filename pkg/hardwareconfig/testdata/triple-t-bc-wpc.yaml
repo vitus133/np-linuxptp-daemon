@@ -9,6 +9,10 @@ spec:
       behavior:
         conditions:
         - desiredStates:
+          - sysfs:
+              path: /sys/class/net/{interface}/device/ptp/ptp*/period"
+              value: 2 0 0 1 0
+              sourceName: PTP
           - dpll:
               boardLabel: GNSS_1PPS
               clockId: Leader
@@ -23,7 +27,7 @@ spec:
                 priority: 255
               pps:
                 priority: 255
-          - dpll:
+          - dpll: 
               boardLabel: CVL_SDP20
               clockId: Leader
               eec:
