@@ -234,20 +234,19 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 	glog.Infof("Applying desired state %d for condition '%s' in profile %s:",
 		stateIndex, conditionName, profileName)
 
+	// Apply sysFS configuration if specified
+	if desiredState.SysFS != nil {
+		if err := hcm.applySysFSDesiredState(*desiredState.SysFS, clockChain); err != nil {
+			return fmt.Errorf("failed to apply sysFS configuration: %w", err)
+		}
+	}
+
 	// Apply DPLL configuration if specified
 	if desiredState.DPLL != nil {
 		if err := hcm.applyDPLLDesiredState(*desiredState.DPLL, conditionName, profileName); err != nil {
 			return fmt.Errorf("failed to apply DPLL configuration: %w", err)
 		}
 	}
-
-	// Apply sysFS configuration if specified
-	if desiredState.SysFS != nil {
-		if err := hcm.applySysFSDesiredState(*desiredState.SysFS, clockChain, conditionName, profileName); err != nil {
-			return fmt.Errorf("failed to apply sysFS configuration: %w", err)
-		}
-	}
-
 	return nil
 }
 
@@ -298,7 +297,7 @@ func (hcm *HardwareConfigManager) applyPinState(pinType string, pinState *types.
 }
 
 // applySysFSDesiredState applies a single sysFS-based desired state configuration
-func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain, _, _ string) error {
+func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain) error {
 	glog.Infof("    Applying sysFS configuration:")
 	glog.Infof("      Path: %s", sysfSDesiredState.Path)
 	glog.Infof("      Value: %s", sysfSDesiredState.Value)
