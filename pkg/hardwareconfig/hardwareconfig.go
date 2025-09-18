@@ -2,6 +2,7 @@ package hardwareconfig
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/golang/glog"
@@ -10,11 +11,15 @@ import (
 )
 
 // HardwareConfigUpdateHandler defines the interface for handling hardware configuration updates
+//
+//nolint:revive // Name is part of established API
 type HardwareConfigUpdateHandler interface {
 	UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error
 }
 
 // HardwareConfigManager manages hardware configurations and their application
+//
+//nolint:revive // Name is part of established API
 type HardwareConfigManager struct {
 	hardwareConfigs []types.HardwareConfig
 }
@@ -247,7 +252,7 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 }
 
 // applyDPLLDesiredState applies DPLL pin configurations
-func (hcm *HardwareConfigManager) applyDPLLDesiredState(dpllDesiredState types.DPLLDesiredState, conditionName, profileName string) error {
+func (hcm *HardwareConfigManager) applyDPLLDesiredState(dpllDesiredState types.DPLLDesiredState, _, _ string) error {
 	glog.Infof("  DPLL Configuration - Clock ID: %s, Board Label: %s", dpllDesiredState.ClockID, dpllDesiredState.BoardLabel)
 
 	// Apply EEC pin state if specified
@@ -268,6 +273,8 @@ func (hcm *HardwareConfigManager) applyDPLLDesiredState(dpllDesiredState types.D
 }
 
 // applyPinState applies a pin state configuration (EEC or PPS)
+//
+//nolint:unparam // TODO implementation always returns nil for now
 func (hcm *HardwareConfigManager) applyPinState(pinType string, pinState *types.PinState, clockID, boardLabel string) error {
 	glog.Infof("    %s pin - Clock ID: %s, Board Label: %s", pinType, clockID, boardLabel)
 
@@ -291,7 +298,7 @@ func (hcm *HardwareConfigManager) applyPinState(pinType string, pinState *types.
 }
 
 // applySysFSDesiredState applies a single sysFS-based desired state configuration
-func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain, conditionName, profileName string) error {
+func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain, _, _ string) error {
 	glog.Infof("    Applying sysFS configuration:")
 	glog.Infof("      Path: %s", sysfSDesiredState.Path)
 	glog.Infof("      Value: %s", sysfSDesiredState.Value)
@@ -308,8 +315,8 @@ func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types
 	// Apply the configuration to each resolved path
 	for _, resolvedPath := range resolvedPaths {
 		glog.Infof("      Writing '%s' to '%s'", sysfSDesiredState.Value, resolvedPath)
-		if err := hcm.writeSysFSValue(resolvedPath, sysfSDesiredState.Value); err != nil {
-			return fmt.Errorf("failed to write sysFS value to %s: %w", resolvedPath, err)
+		if writeErr := hcm.writeSysFSValue(resolvedPath, sysfSDesiredState.Value); writeErr != nil {
+			return fmt.Errorf("failed to write sysFS value to %s: %w", resolvedPath, writeErr)
 		}
 	}
 
@@ -338,6 +345,40 @@ func (hcm *HardwareConfigManager) resolveSysFSPath(sysfSDesiredState types.SysFS
 	resolvedPath := strings.ReplaceAll(path, "{interface}", *interfaceName)
 	resolvedPaths := []string{resolvedPath}
 
+	return resolvedPaths, nil
+}
+
+func (hcm *HardwareConfigManager) resolveSysFSPtpDevice(interfacePath string) ([]string, error) {
+	// If path doesn't contain "ptp*" placeholder, return as-is
+	if !strings.Contains(interfacePath, "ptp*") {
+		return []string{interfacePath}, nil
+	}
+	deviceDir := strings.Split(interfacePath, "ptp*")[0]
+	ptpDevices, err := os.ReadDir(deviceDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ptp devices directory %s: %v", deviceDir, err)
+	}
+	// We loop through ptp devices to find which one has the full path specified  in the sysfs.path
+	// If there are several, we return a list of all the matching full paths
+	atLeastOneMatch := false
+	resolvedPaths := []string{}
+	for _, ptpDevice := range ptpDevices {
+		fullPath := strings.ReplaceAll(interfacePath, "ptp*", ptpDevice.Name())
+		info, statErr := os.Stat(fullPath)
+		if statErr != nil {
+			glog.Infof("can't stat %s: %v", fullPath, statErr)
+			continue
+		}
+		if info.Mode()&0200 == 0 {
+			glog.Infof("file %s is not writable", fullPath)
+			continue
+		}
+		resolvedPaths = append(resolvedPaths, fullPath)
+		atLeastOneMatch = true
+	}
+	if !atLeastOneMatch {
+		return nil, fmt.Errorf("no writable files found for path %s", interfacePath)
+	}
 	return resolvedPaths, nil
 }
 
@@ -375,6 +416,8 @@ func (hcm *HardwareConfigManager) getInterfaceNameFromSources(sourceName string,
 }
 
 // writeSysFSValue writes a value to a sysFS path
+//
+//nolint:unparam // TODO implementation always returns nil for now
 func (hcm *HardwareConfigManager) writeSysFSValue(path, value string) error {
 	// TODO: Implement actual sysFS writing
 	// This would involve:

@@ -110,7 +110,6 @@ func (psd *PTPStateDetector) buildCaches() {
 			}
 		}
 	}
-
 }
 
 // GetMonitoredPorts returns all ports that are being monitored by hardware configs (optimized)

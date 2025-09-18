@@ -3,6 +3,9 @@ package hardwareconfig
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -263,8 +266,8 @@ func TestDetectStateChange(t *testing.T) {
 
 	t.Run("real_log_file_processing", func(t *testing.T) {
 		// Read the real log file
-		logData, err := os.ReadFile("testdata/log2.txt")
-		assert.NoError(t, err, "Should be able to read log2.txt")
+		logData, readErr := os.ReadFile("testdata/log2.txt")
+		assert.NoError(t, readErr, "Should be able to read log2.txt")
 
 		// Split log into lines
 		lines := strings.Split(string(logData), "\n")
@@ -399,11 +402,11 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 			}
 
 			// Apply the condition's desired states
-			err := hcm.applyConditionDesiredStates(condition, profileName, clockChain)
+			applyErr := hcm.applyConditionDesiredStates(condition, profileName, clockChain)
 
 			// All conditions should apply successfully since the YAML is well-formed
-			if err != nil {
-				t.Errorf("Failed to apply condition '%s': %v", condition.Name, err)
+			if applyErr != nil {
+				t.Errorf("Failed to apply condition '%s': %v", condition.Name, applyErr)
 			} else {
 				t.Logf("✅ Successfully applied condition '%s' with %d desired states",
 					condition.Name, len(condition.DesiredStates))
@@ -482,24 +485,170 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 		}
 
 		// Check clock identifiers
-		clockIds := clockChain.CommonDefinitions.ClockIdentifiers
-		if len(clockIds) != 2 {
-			t.Errorf("Expected 2 clock identifiers, got %d", len(clockIds))
+		clockIDs := clockChain.CommonDefinitions.ClockIdentifiers
+		if len(clockIDs) != 2 {
+			t.Errorf("Expected 2 clock identifiers, got %d", len(clockIDs))
 		} else {
-			expectedClockIds := map[string]string{
+			expectedClockIDs := map[string]string{
 				"Leader":   "0x507c6fffff1fb1b8",
 				"Follower": "0x507c6fffff1fb580",
 			}
-			for _, clockId := range clockIds {
-				expectedId, exists := expectedClockIds[clockId.Alias]
+			for _, clockID := range clockIDs {
+				expectedID, exists := expectedClockIDs[clockID.Alias]
 				if !exists {
-					t.Errorf("Unexpected clock identifier alias: %s", clockId.Alias)
-				} else if clockId.ClockID != expectedId {
-					t.Errorf("Expected clock ID %s for %s, got %s", expectedId, clockId.Alias, clockId.ClockID)
+					t.Errorf("Unexpected clock identifier alias: %s", clockID.Alias)
+				} else if clockID.ClockID != expectedID {
+					t.Errorf("Expected clock ID %s for %s, got %s", expectedID, clockID.Alias, clockID.ClockID)
 				} else {
-					t.Logf("✅ Clock identifier validated: %s -> %s", clockId.Alias, clockId.ClockID)
+					t.Logf("✅ Clock identifier validated: %s -> %s", clockID.Alias, clockID.ClockID)
 				}
 			}
+		}
+	})
+}
+
+// TestResolveSysFSPtpDevice tests the resolveSysFSPtpDevice function with mock file system
+func TestResolveSysFSPtpDevice(t *testing.T) {
+	// Create a temporary directory structure for testing
+	tempDir := t.TempDir()
+
+	// Create mock PTP device directories and files
+	ptpDeviceDir := filepath.Join(tempDir, "sys", "class", "net", "eth0", "device", "ptp")
+	if err := os.MkdirAll(ptpDeviceDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory structure: %v", err)
+	}
+
+	// Create mock PTP devices
+	ptp0Dir := filepath.Join(ptpDeviceDir, "ptp0")
+	ptp1Dir := filepath.Join(ptpDeviceDir, "ptp1")
+	ptp2Dir := filepath.Join(ptpDeviceDir, "ptp2")
+
+	if err := os.MkdirAll(ptp0Dir, 0755); err != nil {
+		t.Fatalf("Failed to create ptp0 directory: %v", err)
+	}
+	if err := os.MkdirAll(ptp1Dir, 0755); err != nil {
+		t.Fatalf("Failed to create ptp1 directory: %v", err)
+	}
+	if err := os.MkdirAll(ptp2Dir, 0755); err != nil {
+		t.Fatalf("Failed to create ptp2 directory: %v", err)
+	}
+
+	// Create test files with different permissions
+	writableFile := filepath.Join(ptp0Dir, "period")
+	readOnlyFile := filepath.Join(ptp1Dir, "period")
+	anotherWritableFile := filepath.Join(ptp2Dir, "period")
+
+	// Create writable files (0644 has write permission for owner)
+	if err := os.WriteFile(writableFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create writable test file: %v", err)
+	}
+
+	if err := os.WriteFile(anotherWritableFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create another writable test file: %v", err)
+	}
+
+	// Create read-only file (0444 has no write permission)
+	if err := os.WriteFile(readOnlyFile, []byte("test"), 0444); err != nil {
+		t.Fatalf("Failed to create read-only test file: %v", err)
+	}
+
+	// Create HardwareConfigManager for testing
+	hcm := &HardwareConfigManager{
+		hardwareConfigs: make([]types.HardwareConfig, 0),
+	}
+
+	testCases := []struct {
+		name          string
+		interfacePath string
+		expectedPaths []string
+		expectedError bool
+		description   string
+	}{
+		{
+			name:          "no_ptp_placeholder",
+			interfacePath: "/sys/class/net/eth0/carrier",
+			expectedPaths: []string{"/sys/class/net/eth0/carrier"},
+			expectedError: false,
+			description:   "Should return path as-is when no ptp* placeholder is present",
+		},
+		{
+			name:          "valid_ptp_devices_found",
+			interfacePath: filepath.Join(tempDir, "sys/class/net/eth0/device/ptp/ptp*/period"),
+			expectedPaths: []string{
+				filepath.Join(tempDir, "sys/class/net/eth0/device/ptp/ptp0/period"),
+				filepath.Join(tempDir, "sys/class/net/eth0/device/ptp/ptp2/period"),
+			},
+			expectedError: false,
+			description:   "Should return all writable PTP device paths",
+		},
+		{
+			name:          "nonexistent_directory",
+			interfacePath: filepath.Join(tempDir, "nonexistent/ptp/ptp*/period"),
+			expectedPaths: nil,
+			expectedError: true,
+			description:   "Should return error when PTP device directory doesn't exist",
+		},
+		{
+			name:          "no_writable_files",
+			interfacePath: filepath.Join(tempDir, "sys/class/net/eth0/device/ptp/ptp*/nonexistent"),
+			expectedPaths: nil,
+			expectedError: true,
+			description:   "Should return error when no writable files are found",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("Testing: %s", tc.description)
+
+			result, testErr := hcm.resolveSysFSPtpDevice(tc.interfacePath)
+
+			if tc.expectedError {
+				if testErr == nil {
+					t.Errorf("Expected error but got none")
+				} else {
+					t.Logf("✅ Got expected error: %v", testErr)
+				}
+			} else {
+				if testErr != nil {
+					t.Errorf("Unexpected error: %v", testErr)
+				} else {
+					// Sort both slices for comparison since order might vary
+					sort.Strings(result)
+					sort.Strings(tc.expectedPaths)
+
+					if !reflect.DeepEqual(result, tc.expectedPaths) {
+						t.Errorf("Expected paths: %v, Got: %v", tc.expectedPaths, result)
+					} else {
+						t.Logf("✅ Successfully resolved %d PTP device paths", len(result))
+						for i, path := range result {
+							t.Logf("   Path %d: %s", i+1, path)
+						}
+					}
+				}
+			}
+		})
+	}
+
+	// Additional test for edge cases
+	t.Run("edge_cases", func(t *testing.T) {
+		// Test empty path
+		result, edgeErr := hcm.resolveSysFSPtpDevice("")
+		if edgeErr != nil {
+			t.Errorf("Empty path should not return error, got: %v", edgeErr)
+		}
+		if len(result) != 1 || result[0] != "" {
+			t.Errorf("Empty path should return empty string, got: %v", result)
+		}
+
+		// Test path with multiple ptp* placeholders (edge case)
+		complexPath := filepath.Join(tempDir, "sys/class/net/eth0/device/ptp/ptp*/subdir/ptp*/period")
+		result, edgeErr = hcm.resolveSysFSPtpDevice(complexPath)
+		// This should still work as it only splits on the first ptp*
+		if edgeErr != nil {
+			t.Logf("Complex path with multiple ptp* placeholders returned error (expected): %v", edgeErr)
+		} else {
+			t.Logf("Complex path resolved to: %v", result)
 		}
 	})
 }
