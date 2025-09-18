@@ -36,6 +36,7 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/client-go/kubernetes"
 
+	dpllYnl "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 )
 
@@ -254,6 +255,9 @@ type Daemon struct {
 
 	// Allow vendors to include plugins
 	pluginManager PluginManager
+
+	// Include cached DPLL identities data
+	dpllCache []*dpllYnl.PinInfo
 }
 
 func (dn *Daemon) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
@@ -290,6 +294,10 @@ func New(
 		ptpEventHandler: event.Init(nodeName, stdoutToSocket, eventSocket, eventChannel, closeManager, Offset, ClockState, ClockClassMetrics),
 	}
 	tracker.processManager = pm
+	dpllCache, err := hardwareconfig.GetDpllPins()
+	if err != nil {
+		glog.Errorf("failed to get dpll pins: %v", err)
+	}
 	return &Daemon{
 		nodeName:              nodeName,
 		namespace:             namespace,
@@ -304,6 +312,7 @@ func New(
 		processManager:        pm,
 		readyTracker:          tracker,
 		stopCh:                stopCh,
+		dpllCache:             dpllCache,
 	}
 }
 
