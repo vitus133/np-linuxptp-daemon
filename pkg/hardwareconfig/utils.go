@@ -167,6 +167,7 @@ func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 // SetupMockDpllPinsForTests sets up mock DPLL pins for daemon tests using simple test data
 func SetupMockDpllPinsForTests() error {
 	// Create simple mock data for tests that don't need real pin data
+	// Include all board labels used in triple-t-bc-wpc.yaml
 	mockPins := []*dpll.PinInfo{
 		{
 			ID:           0,
@@ -176,6 +177,9 @@ func SetupMockDpllPinsForTests() error {
 			Type:         4, // int-oscillator
 			Frequency:    1,
 			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 0, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
 		},
 		{
 			ID:           6,
@@ -185,6 +189,83 @@ func SetupMockDpllPinsForTests() error {
 			Type:         5, // gnss
 			Frequency:    1,
 			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 0, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
+		},
+		// Add pins for Leader clock ID (0x507c6fffff1fb1b8)
+		{
+			ID:           10,
+			ClockID:      0x507c6fffff1fb1b8,
+			BoardLabel:   "CVL-SDP20",
+			ModuleName:   "ice",
+			Type:         4, // int-oscillator
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 2, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
+		},
+		{
+			ID:           11,
+			ClockID:      0x507c6fffff1fb1b8,
+			BoardLabel:   "CVL-SDP21",
+			ModuleName:   "ice",
+			Type:         2, // ext
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 2, Direction: dpll.PinDirectionOutput, Prio: 0, State: dpll.PinStateConnected},
+			},
+		},
+		{
+			ID:           12,
+			ClockID:      0x507c6fffff1fb1b8,
+			BoardLabel:   "CVL-SDP22",
+			ModuleName:   "ice",
+			Type:         4, // int-oscillator
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 2, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
+		},
+		{
+			ID:           13,
+			ClockID:      0x507c6fffff1fb1b8,
+			BoardLabel:   "CVL-SDP23",
+			ModuleName:   "ice",
+			Type:         2, // ext
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 2, Direction: dpll.PinDirectionOutput, Prio: 0, State: dpll.PinStateConnected},
+			},
+		},
+		{
+			ID:           14,
+			ClockID:      0x507c6fffff1fb1b8,
+			BoardLabel:   "GNSS-1PPS",
+			ModuleName:   "ice",
+			Type:         5, // gnss
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 2, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
+		},
+		// Add pins for Follower clock ID (0x507c6fffff1fb580)
+		{
+			ID:           20,
+			ClockID:      0x507c6fffff1fb580,
+			BoardLabel:   "GNSS-1PPS",
+			ModuleName:   "ice",
+			Type:         5, // gnss
+			Frequency:    1,
+			Capabilities: 6, // state-can-change,priority-can-change
+			ParentDevice: []dpll.PinParentDevice{
+				{ParentID: 4, Direction: dpll.PinDirectionInput, Prio: 255, State: dpll.PinStateSelectable},
+			},
 		},
 	}
 	mockGetter := CreateMockDpllPinsGetter(mockPins, nil)
@@ -204,7 +285,6 @@ func SetupMockDpllPinsForTestsWithError(err error) {
 	SetDpllPinsGetter(mockGetter)
 }
 
-// TeardownMockDpllPinsForTests resets the DPLL pins getter to default
 func TeardownMockDpllPinsForTests() {
 	ResetDpllPinsGetter()
 }

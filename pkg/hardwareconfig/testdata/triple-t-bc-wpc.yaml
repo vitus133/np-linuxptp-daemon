@@ -14,28 +14,28 @@ spec:
               value: 2 0 0 1 0
               sourceName: PTP
           - dpll:
-              boardLabel: GNSS_1PPS
+              boardLabel: GNSS-1PPS
               clockId: Leader
               eec:
                 priority: 255
               pps:
                 priority: 255
           - dpll:
-              boardLabel: GNSS_1PPS
+              boardLabel: GNSS-1PPS
               clockId: Follower
               eec:
                 priority: 255
               pps:
                 priority: 255
           - dpll: 
-              boardLabel: CVL_SDP20
+              boardLabel: CVL-SDP20
               clockId: Leader
               eec:
                 priority: 255
               pps:
                 priority: 255
           - dpll:
-              boardLabel: CVL_SDP21
+              boardLabel: CVL-SDP21
               clockId: Leader
               eec:
                 state: disconnected
@@ -47,14 +47,14 @@ spec:
             sourceName: PTP
         - desiredStates:
           - dpll:
-              boardLabel: CVL_SDP22
+              boardLabel: CVL-SDP22
               clockId: Leader
               eec:
                 priority: 255
               pps:
                 priority: 0
           - dpll:
-              boardLabel: CVL_SDP23
+              boardLabel: CVL-SDP23
               clockId: Leader
               eec:
                 state: disconnected
@@ -66,14 +66,14 @@ spec:
             sourceName: PTP
         - desiredStates:
           - dpll:
-              boardLabel: CVL_SDP22
+              boardLabel: CVL-SDP22
               clockId: Leader
               eec:
                 priority: 255
               pps:
                 priority: 255
           - dpll:
-              boardLabel: CVL_SDP23
+              boardLabel: CVL-SDP23
               clockId: Leader
               eec:
                 state: connected
@@ -84,7 +84,7 @@ spec:
           - conditionType: lost
             sourceName: PTP
         sources:
-        - boardLabel: CVL_SDP22
+        - boardLabel: CVL-SDP22
           clockId: Leader
           name: PTP
           ptpTimeReceivers:
