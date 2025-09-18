@@ -834,6 +834,10 @@ func TestProcessTBCTransitionHardwareConfig(t *testing.T) {
 
 // TestProcessTBCTransitionHardwareConfig_WithRealData tests the function with real hardware config and log data
 func TestProcessTBCTransitionHardwareConfig_WithRealData(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	hardwareconfig.SetupMockPtpDeviceResolver()
+	defer hardwareconfig.TeardownMockPtpDeviceResolver()
+
 	// Set up mock DPLL pins for testing
 	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
 	if mockErr != nil {
@@ -968,6 +972,10 @@ func TestProcessTBCTransitionHardwareConfig_WithRealData(t *testing.T) {
 
 // TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration tests integration with real hardware config
 func TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	hardwareconfig.SetupMockPtpDeviceResolver()
+	defer hardwareconfig.TeardownMockPtpDeviceResolver()
+
 	// Set up mock DPLL pins for testing
 	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
 	if mockErr != nil {
@@ -1042,6 +1050,10 @@ func TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration(t *testing
 
 // TestProcessTBCTransitionHardwareConfig_ProcessLogFile reads log data line by line and processes it
 func TestProcessTBCTransitionHardwareConfig_ProcessLogFile(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	hardwareconfig.SetupMockPtpDeviceResolver()
+	defer hardwareconfig.TeardownMockPtpDeviceResolver()
+
 	// Set up mock DPLL pins for testing
 	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
 	if mockErr != nil {

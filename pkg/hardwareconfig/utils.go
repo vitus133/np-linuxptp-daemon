@@ -2,6 +2,9 @@ package hardwareconfig
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -287,4 +290,119 @@ func SetupMockDpllPinsForTestsWithError(err error) {
 
 func TeardownMockDpllPinsForTests() {
 	ResetDpllPinsGetter()
+}
+
+// PtpDeviceResolver is a function type for resolving PTP device paths
+type PtpDeviceResolver func(interfacePath string) ([]string, error)
+
+// defaultResolveSysFSPtpDevice is the default implementation that reads from the real file system
+func defaultResolveSysFSPtpDevice(interfacePath string) ([]string, error) {
+	// If path doesn't contain "ptp*" placeholder, return as-is
+	if !strings.Contains(interfacePath, "ptp*") {
+		return []string{interfacePath}, nil
+	}
+
+	// Extract the directory path and filename
+	pathParts := strings.Split(interfacePath, "ptp*")
+	if len(pathParts) != 2 {
+		return nil, fmt.Errorf("invalid ptp* pattern in path: %s", interfacePath)
+	}
+
+	ptpDir := filepath.Dir(pathParts[0] + "ptp0") // Use ptp0 as template to get the directory
+	filename := pathParts[1]
+
+	// Read the PTP devices directory
+	entries, err := os.ReadDir(ptpDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ptp devices directory %s: %w", ptpDir, err)
+	}
+
+	var resolvedPaths []string
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "ptp") {
+			// Construct the full path
+			fullPath := filepath.Join(ptpDir, entry.Name()) + filename
+
+			// Check if the target file exists and is writable
+			if info, statErr := os.Stat(fullPath); statErr == nil && !info.IsDir() {
+				// Try to open the file for writing to check if it's writable
+				if file, openErr := os.OpenFile(fullPath, os.O_WRONLY, 0); openErr == nil {
+					file.Close()
+					resolvedPaths = append(resolvedPaths, fullPath)
+				}
+			}
+		}
+	}
+
+	if len(resolvedPaths) == 0 {
+		return nil, fmt.Errorf("no writable files found for path %s", interfacePath)
+	}
+
+	return resolvedPaths, nil
+}
+
+// Global variables for PTP device resolution mocking
+var (
+	defaultPtpDeviceResolver PtpDeviceResolver = defaultResolveSysFSPtpDevice
+	ptpDeviceResolver        PtpDeviceResolver = defaultPtpDeviceResolver
+)
+
+// SetPtpDeviceResolver allows injection of a mock PTP device resolver for testing
+func SetPtpDeviceResolver(resolver PtpDeviceResolver) {
+	ptpDeviceResolver = resolver
+}
+
+// ResetPtpDeviceResolver resets the PTP device resolver to the default implementation
+func ResetPtpDeviceResolver() {
+	ptpDeviceResolver = defaultPtpDeviceResolver
+}
+
+// CreateMockPtpDeviceResolver creates a mock PTP device resolver
+func CreateMockPtpDeviceResolver(mockDevices map[string][]string, returnError error) PtpDeviceResolver {
+	return func(interfacePath string) ([]string, error) {
+		if returnError != nil {
+			return nil, returnError
+		}
+
+		if devices, exists := mockDevices[interfacePath]; exists {
+			return devices, nil
+		}
+
+		// If no specific mock is provided, try to extract a pattern and return mock devices
+		if strings.Contains(interfacePath, "ptp*") {
+			// Replace ptp* with mock devices
+			var result []string
+			for i := 0; i < 2; i++ { // Default to 2 mock devices
+				mockPath := strings.Replace(interfacePath, "ptp*", fmt.Sprintf("ptp%d", i), 1)
+				result = append(result, mockPath)
+			}
+			return result, nil
+		}
+
+		return []string{interfacePath}, nil
+	}
+}
+
+// SetupMockPtpDeviceResolver sets up a default mock PTP device resolver for tests
+func SetupMockPtpDeviceResolver() {
+	mockDevices := make(map[string][]string)
+	mockResolver := CreateMockPtpDeviceResolver(mockDevices, nil)
+	SetPtpDeviceResolver(mockResolver)
+}
+
+// SetupMockPtpDeviceResolverWithDevices sets up a mock PTP device resolver with specific devices
+func SetupMockPtpDeviceResolverWithDevices(mockDevices map[string][]string) {
+	mockResolver := CreateMockPtpDeviceResolver(mockDevices, nil)
+	SetPtpDeviceResolver(mockResolver)
+}
+
+// SetupMockPtpDeviceResolverWithError sets up a mock PTP device resolver that returns an error
+func SetupMockPtpDeviceResolverWithError(err error) {
+	mockResolver := CreateMockPtpDeviceResolver(nil, err)
+	SetPtpDeviceResolver(mockResolver)
+}
+
+// TeardownMockPtpDeviceResolver resets the PTP device resolver to the default implementation
+func TeardownMockPtpDeviceResolver() {
+	ResetPtpDeviceResolver()
 }

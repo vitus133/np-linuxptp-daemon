@@ -10,7 +10,7 @@ spec:
         conditions:
         - desiredStates:
           - sysfs:
-              path: /sys/class/net/{interface}/device/ptp/ptp*/period"
+              path: /sys/class/net/{interface}/device/ptp/ptp*/period
               value: 2 0 0 1 0
               sourceName: PTP
           - dpll:

@@ -2,7 +2,6 @@ package hardwareconfig
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/golang/glog"
@@ -18,9 +17,17 @@ type HardwareConfigUpdateHandler interface {
 	UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error
 }
 
+// SysFSCommand represents a resolved sysFS command ready for execution
+type SysFSCommand struct {
+	Path        string // Resolved path (with interface names substituted)
+	Value       string // Value to write
+	Description string // Optional description for logging
+}
+
 type enrichedHardwareConfig struct {
 	types.HardwareConfig
 	dpllPinCommands map[string][]dpll.PinParentDeviceCtl
+	sysFSCommands   map[string][]SysFSCommand // condition name -> resolved sysFS commands
 }
 
 // HardwareConfigManager manages hardware configurations and their application
@@ -65,11 +72,12 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 		hcm.hardwareConfigs[i] = enrichedHardwareConfig{
 			HardwareConfig: hwConfig,
 		}
-		commands, err := hcm.resolveClockChainBehavior(hwConfig)
+		dpllCommands, sysFSCommands, err := hcm.resolveClockChainBehavior(hwConfig)
 		if err != nil {
 			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, err)
 		}
-		hcm.hardwareConfigs[i].dpllPinCommands = commands
+		hcm.hardwareConfigs[i].dpllPinCommands = dpllCommands
+		hcm.hardwareConfigs[i].sysFSCommands = sysFSCommands
 
 	}
 
@@ -108,28 +116,38 @@ func (hcm *HardwareConfigManager) GetHardwareConfigsForProfile(nodeProfile *ptpv
 // ApplyHardwareConfigsForProfile applies hardware configurations for a PTP profile
 // It processes "default" and "init" conditions in order, applying their desired states
 func (hcm *HardwareConfigManager) ApplyHardwareConfigsForProfile(nodeProfile *ptpv1.PtpProfile) error {
-	relevantConfigs := hcm.GetHardwareConfigsForProfile(nodeProfile)
+	if nodeProfile.Name == nil {
+		return fmt.Errorf("PTP profile has no name")
+	}
+
+	// Find enriched hardware configs for this profile
+	var relevantConfigs []enrichedHardwareConfig
+	for _, hwConfig := range hcm.hardwareConfigs {
+		if hwConfig.Spec.RelatedPtpProfileName == *nodeProfile.Name {
+			relevantConfigs = append(relevantConfigs, hwConfig)
+		}
+	}
 
 	glog.Infof("Applying %d hardware configurations for PTP profile %s",
 		len(relevantConfigs), *nodeProfile.Name)
 
-	for _, hwProfile := range relevantConfigs {
+	for _, enrichedConfig := range relevantConfigs {
 		profileName := "unnamed"
-		if hwProfile.Name != nil {
-			profileName = *hwProfile.Name
+		if enrichedConfig.Spec.Profile.Name != nil {
+			profileName = *enrichedConfig.Spec.Profile.Name
 		}
 
 		glog.Infof("Applying hardware profile: %s", profileName)
 
-		if hwProfile.ClockChain != nil {
+		if enrichedConfig.Spec.Profile.ClockChain != nil {
 			// Log subsystem structure
-			for _, subsystem := range hwProfile.ClockChain.Structure {
+			for _, subsystem := range enrichedConfig.Spec.Profile.ClockChain.Structure {
 				glog.Infof("  Subsystem: %s (Plugin: %s, Clock ID: %s)",
 					subsystem.Name, subsystem.HardwarePlugin, subsystem.DPLL.ClockID)
 			}
 
 			// Extract and apply "default" and "init" conditions in order
-			if err := hcm.applyDefaultAndInitConditions(hwProfile.ClockChain, profileName); err != nil {
+			if err := hcm.applyDefaultAndInitConditions(enrichedConfig.Spec.Profile.ClockChain, profileName, &enrichedConfig); err != nil {
 				return fmt.Errorf("failed to apply default/init conditions for profile %s: %w", profileName, err)
 			}
 		}
@@ -141,18 +159,32 @@ func (hcm *HardwareConfigManager) ApplyHardwareConfigsForProfile(nodeProfile *pt
 	return fmt.Errorf("hardware config application not implemented, use plugin fallback")
 }
 
-func (hcm *HardwareConfigManager) resolveClockChainBehavior(hwConfig types.HardwareConfig) (map[string][]dpll.PinParentDeviceCtl, error) {
+func (hcm *HardwareConfigManager) resolveClockChainBehavior(hwConfig types.HardwareConfig) (map[string][]dpll.PinParentDeviceCtl, map[string][]SysFSCommand, error) {
 	clockChain := hwConfig.Spec.Profile.ClockChain
+	if clockChain == nil {
+		// Return empty maps if there's no clock chain
+		return make(map[string][]dpll.PinParentDeviceCtl), make(map[string][]SysFSCommand), nil
+	}
 	conditions := hcm.extractConditionByType(clockChain)
 	pinCommandsPerCondition := make(map[string][]dpll.PinParentDeviceCtl)
+	sysFSCommandsPerCondition := make(map[string][]SysFSCommand)
+
 	for conditionName, condition := range conditions {
+		// Resolve DPLL pin commands
 		pinCommands, err := hcm.resolveDpllPinCommands(condition)
 		if err != nil {
-			return pinCommandsPerCondition, fmt.Errorf("failed to resolve DPLL pin commands for condition %s: %w", condition.Name, err)
+			return nil, nil, fmt.Errorf("failed to resolve DPLL pin commands for condition %s: %w", condition.Name, err)
 		}
 		pinCommandsPerCondition[conditionName] = pinCommands
+
+		// Resolve sysFS commands
+		sysFSCommands, err := hcm.resolveSysFSCommands(condition, clockChain)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to resolve sysFS commands for condition %s: %w", condition.Name, err)
+		}
+		sysFSCommandsPerCondition[conditionName] = sysFSCommands
 	}
-	return pinCommandsPerCondition, nil
+	return pinCommandsPerCondition, sysFSCommandsPerCondition, nil
 }
 
 func (hcm *HardwareConfigManager) resolveDpllPinCommands(condition types.Condition) ([]dpll.PinParentDeviceCtl, error) {
@@ -167,6 +199,29 @@ func (hcm *HardwareConfigManager) resolveDpllPinCommands(condition types.Conditi
 		}
 	}
 	return pinCommands, nil
+}
+
+func (hcm *HardwareConfigManager) resolveSysFSCommands(condition types.Condition, clockChain *types.ClockChain) ([]SysFSCommand, error) {
+	sysFSCommands := []SysFSCommand{}
+	for _, desiredState := range condition.DesiredStates {
+		if desiredState.SysFS != nil {
+			// Resolve the sysFS paths (handle interface templating)
+			resolvedPaths, err := hcm.resolveSysFSPath(*desiredState.SysFS, clockChain)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve sysFS path: %w", err)
+			}
+
+			// Create a command for each resolved path
+			for _, resolvedPath := range resolvedPaths {
+				sysFSCommands = append(sysFSCommands, SysFSCommand{
+					Path:        resolvedPath,
+					Value:       desiredState.SysFS.Value,
+					Description: desiredState.SysFS.Description,
+				})
+			}
+		}
+	}
+	return sysFSCommands, nil
 }
 
 func (hcm *HardwareConfigManager) extractConditionByType(clockChain *types.ClockChain) map[string]types.Condition {
@@ -250,7 +305,7 @@ func (hcm *HardwareConfigManager) createPinCommandForDPLLDesiredState(dpllDesire
 }
 
 // applyDefaultAndInitConditions extracts and applies "default" and "init" conditions in order
-func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *types.ClockChain, profileName string) error {
+func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *types.ClockChain, profileName string, enrichedConfig *enrichedHardwareConfig) error {
 	if clockChain.Behavior == nil {
 		glog.Infof("No behavior section found in hardware profile %s", profileName)
 		return nil
@@ -266,7 +321,7 @@ func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *type
 	// Apply default conditions first
 	for i, condition := range defaultConditions {
 		glog.Infof("Applying default condition %d: %s", i+1, condition.Name)
-		if err := hcm.applyConditionDesiredStates(condition, profileName, clockChain); err != nil {
+		if err := hcm.applyConditionDesiredStates(condition, profileName, clockChain, enrichedConfig); err != nil {
 			return fmt.Errorf("failed to apply default condition '%s': %w", condition.Name, err)
 		}
 	}
@@ -274,7 +329,7 @@ func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *type
 	// Apply init conditions second
 	for i, condition := range initConditions {
 		glog.Infof("Applying init condition %d: %s", i+1, condition.Name)
-		if err := hcm.applyConditionDesiredStates(condition, profileName, clockChain); err != nil {
+		if err := hcm.applyConditionDesiredStates(condition, profileName, clockChain, enrichedConfig); err != nil {
 			return fmt.Errorf("failed to apply init condition '%s': %w", condition.Name, err)
 		}
 	}
@@ -309,13 +364,42 @@ func (hcm *HardwareConfigManager) extractConditionsByType(conditions []types.Con
 }
 
 // applyConditionDesiredStates applies the desired states for a given condition
-func (hcm *HardwareConfigManager) applyConditionDesiredStates(condition types.Condition, profileName string, clockChain *types.ClockChain) error {
+func (hcm *HardwareConfigManager) applyConditionDesiredStates(condition types.Condition, profileName string, clockChain *types.ClockChain, enrichedConfig *enrichedHardwareConfig) error {
 	glog.Infof("Applying %d desired states for condition '%s' in profile %s",
 		len(condition.DesiredStates), condition.Name, profileName)
 
+	// Apply cached sysFS commands for this condition
+	if sysFSCommands, exists := enrichedConfig.sysFSCommands[condition.Name]; exists && len(sysFSCommands) > 0 {
+		if err := hcm.applyCachedSysFSCommands(sysFSCommands, condition.Name, profileName); err != nil {
+			return fmt.Errorf("failed to apply cached sysFS commands: %w", err)
+		}
+	}
+
+	// Apply individual desired states (for DPLL and other non-sysFS configurations)
 	for i, desiredState := range condition.DesiredStates {
 		if err := hcm.applyDesiredState(desiredState, condition.Name, profileName, i+1, clockChain); err != nil {
 			return fmt.Errorf("failed to apply desired state %d: %w", i+1, err)
+		}
+	}
+
+	return nil
+}
+
+// applyCachedSysFSCommands applies pre-resolved sysFS commands for a condition
+func (hcm *HardwareConfigManager) applyCachedSysFSCommands(commands []SysFSCommand, conditionName, profileName string) error {
+	glog.Infof("  Applying %d cached sysFS commands for condition '%s' in profile %s",
+		len(commands), conditionName, profileName)
+
+	for i, cmd := range commands {
+		glog.Infof("    SysFS command %d:", i+1)
+		glog.Infof("      Path: %s", cmd.Path)
+		glog.Infof("      Value: %s", cmd.Value)
+		if cmd.Description != "" {
+			glog.Infof("      Description: %s", cmd.Description)
+		}
+
+		if err := hcm.writeSysFSValue(cmd.Path, cmd.Value); err != nil {
+			return fmt.Errorf("failed to write sysFS value '%s' to path '%s': %w", cmd.Value, cmd.Path, err)
 		}
 	}
 
@@ -327,12 +411,8 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 	glog.Infof("Applying desired state %d for condition '%s' in profile %s:",
 		stateIndex, conditionName, profileName)
 
-	// Apply sysFS configuration if specified
-	if desiredState.SysFS != nil {
-		if err := hcm.applySysFSDesiredState(*desiredState.SysFS, clockChain); err != nil {
-			return fmt.Errorf("failed to apply sysFS configuration: %w", err)
-		}
-	}
+	// Note: SysFS configurations are now applied via cached commands in applyCachedSysFSCommands
+	// Individual sysFS desired states are no longer applied here to avoid duplicate resolution
 
 	// Apply DPLL configuration if specified
 	if desiredState.DPLL != nil {
@@ -342,11 +422,6 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 	}
 	return nil
 }
-
-const (
-	eecDpllIndex = 0
-	ppsDpllIndex = 1
-)
 
 // applySysFSDesiredState applies a single sysFS-based desired state configuration
 func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain) error {
@@ -394,43 +469,17 @@ func (hcm *HardwareConfigManager) resolveSysFSPath(sysfSDesiredState types.SysFS
 	}
 
 	resolvedPath := strings.ReplaceAll(path, "{interface}", *interfaceName)
-	resolvedPaths := []string{resolvedPath}
 
-	return resolvedPaths, nil
+	// Also resolve ptp* placeholders if present
+	if strings.Contains(resolvedPath, "ptp*") {
+		return hcm.resolveSysFSPtpDevice(resolvedPath)
+	}
+
+	return []string{resolvedPath}, nil
 }
 
 func (hcm *HardwareConfigManager) resolveSysFSPtpDevice(interfacePath string) ([]string, error) {
-	// If path doesn't contain "ptp*" placeholder, return as-is
-	if !strings.Contains(interfacePath, "ptp*") {
-		return []string{interfacePath}, nil
-	}
-	deviceDir := strings.Split(interfacePath, "ptp*")[0]
-	ptpDevices, err := os.ReadDir(deviceDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read ptp devices directory %s: %v", deviceDir, err)
-	}
-	// We loop through ptp devices to find which one has the full path specified  in the sysfs.path
-	// If there are several, we return a list of all the matching full paths
-	atLeastOneMatch := false
-	resolvedPaths := []string{}
-	for _, ptpDevice := range ptpDevices {
-		fullPath := strings.ReplaceAll(interfacePath, "ptp*", ptpDevice.Name())
-		info, statErr := os.Stat(fullPath)
-		if statErr != nil {
-			glog.Infof("can't stat %s: %v", fullPath, statErr)
-			continue
-		}
-		if info.Mode()&0200 == 0 {
-			glog.Infof("file %s is not writable", fullPath)
-			continue
-		}
-		resolvedPaths = append(resolvedPaths, fullPath)
-		atLeastOneMatch = true
-	}
-	if !atLeastOneMatch {
-		return nil, fmt.Errorf("no writable files found for path %s", interfacePath)
-	}
-	return resolvedPaths, nil
+	return ptpDeviceResolver(interfacePath)
 }
 
 // getInterfaceNameFromSources extracts the default interface name from the structure section

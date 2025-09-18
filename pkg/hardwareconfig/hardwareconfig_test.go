@@ -18,6 +18,9 @@ import (
 )
 
 func TestApplyHardwareConfigsForProfile(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
 	// Set up mock DPLL pins from test file for testing
 	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
@@ -81,6 +84,10 @@ func TestApplyHardwareConfigsForProfile(t *testing.T) {
 }
 
 func TestHardwareConfigManagerOperations(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
+
 	// Set up mock DPLL pins from test file for testing
 	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
@@ -204,6 +211,9 @@ func TestNewHardwareConfigManager(t *testing.T) {
 }
 
 func TestPTPStateDetector(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
 	// Set up mock DPLL pins from test file for testing
 	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
@@ -235,6 +245,9 @@ func TestPTPStateDetector(t *testing.T) {
 }
 
 func TestDetectStateChange(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
 	// Set up mock DPLL pins from test file for testing
 	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
@@ -469,8 +482,14 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 				}
 			}
 
+			// Create a mock enriched hardware config for testing
+			mockEnrichedConfig := &enrichedHardwareConfig{
+				HardwareConfig: *hwConfig,
+				sysFSCommands:  make(map[string][]SysFSCommand),
+			}
+
 			// Apply the condition's desired states
-			applyErr := hcm.applyConditionDesiredStates(condition, profileName, clockChain)
+			applyErr := hcm.applyConditionDesiredStates(condition, profileName, clockChain, mockEnrichedConfig)
 
 			// All conditions should apply successfully since the YAML is well-formed
 			if applyErr != nil {
@@ -591,6 +610,9 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 
 // TestApplyDefaultAndInitConditions tests the applyDefaultAndInitConditions function
 func TestApplyDefaultAndInitConditions(t *testing.T) {
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
 	// Set up mock DPLL pins from test file for testing
 	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
@@ -647,8 +669,14 @@ func TestApplyDefaultAndInitConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Create a mock enriched hardware config for testing
+			mockEnrichedConfig := &enrichedHardwareConfig{
+				HardwareConfig: types.HardwareConfig{},
+				sysFSCommands:  make(map[string][]SysFSCommand),
+			}
+
 			// Test the function
-			err := hcm.applyDefaultAndInitConditions(tt.clockChain, tt.profileName)
+			err := hcm.applyDefaultAndInitConditions(tt.clockChain, tt.profileName, mockEnrichedConfig)
 
 			// Verify error expectation
 			if tt.expectError {
@@ -914,4 +942,124 @@ func TestResolveSysFSPtpDevice(t *testing.T) {
 			t.Logf("Complex path resolved to: %v", result)
 		}
 	})
+}
+
+func TestSysFSCommandCaching(t *testing.T) {
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
+	// Set up mock PTP device resolver for testing
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
+
+	t.Logf("Set up mock PTP device resolver")
+
+	// Load the hardware config from testdata using the proper loader
+	hwConfigPtr, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
+	assert.NoError(t, err, "Should be able to load hardware config from file")
+	assert.NotNil(t, hwConfigPtr, "Hardware config should not be nil")
+
+	hwConfig := *hwConfigPtr
+
+	// Debug the parsed structure
+	t.Logf("Parsed hardware config:")
+	t.Logf("  Name: %s", hwConfig.Name)
+	t.Logf("  Spec.RelatedPtpProfileName: %s", hwConfig.Spec.RelatedPtpProfileName)
+	if hwConfig.Spec.Profile.Name != nil {
+		t.Logf("  Spec.Profile.Name: %s", *hwConfig.Spec.Profile.Name)
+	} else {
+		t.Logf("  Spec.Profile.Name: nil")
+	}
+	if hwConfig.Spec.Profile.ClockChain != nil {
+		t.Logf("  Spec.Profile.ClockChain: exists")
+	} else {
+		t.Logf("  Spec.Profile.ClockChain: nil")
+	}
+
+	// Create hardware config manager
+	hcm := NewHardwareConfigManager()
+
+	// Log the hardware config structure for debugging
+	if hwConfig.Spec.Profile.ClockChain != nil && hwConfig.Spec.Profile.ClockChain.Behavior != nil {
+		t.Logf("Hardware config has %d conditions in behavior", len(hwConfig.Spec.Profile.ClockChain.Behavior.Conditions))
+		for i, condition := range hwConfig.Spec.Profile.ClockChain.Behavior.Conditions {
+			t.Logf("  Condition %d: Name='%s', Sources=%d, DesiredStates=%d",
+				i+1, condition.Name, len(condition.Sources), len(condition.DesiredStates))
+			if len(condition.Sources) > 0 {
+				t.Logf("    First source: ConditionType='%s', SourceName='%s'",
+					condition.Sources[0].ConditionType, condition.Sources[0].SourceName)
+			}
+			for j, ds := range condition.DesiredStates {
+				if ds.SysFS != nil {
+					t.Logf("    DesiredState %d: SysFS Path='%s', Value='%s'",
+						j+1, ds.SysFS.Path, ds.SysFS.Value)
+				}
+			}
+		}
+	} else {
+		t.Logf("Hardware config has no clock chain or behavior section")
+	}
+
+	// Update hardware config - this should trigger sysFS command caching
+	err = hcm.UpdateHardwareConfig([]types.HardwareConfig{hwConfig})
+	assert.NoError(t, err, "Should be able to update hardware config with sysFS command caching")
+
+	// Verify that enriched configs were created
+	assert.Equal(t, 1, len(hcm.hardwareConfigs), "Should have 1 enriched hardware config")
+
+	enrichedConfig := hcm.hardwareConfigs[0]
+
+	// Verify that sysFS commands were cached
+	assert.NotNil(t, enrichedConfig.sysFSCommands, "SysFS commands cache should be initialized")
+
+	// Check all cached sysFS commands from the hardware config
+	t.Logf("Found %d condition types with cached sysFS commands", len(enrichedConfig.sysFSCommands))
+	for conditionType, commands := range enrichedConfig.sysFSCommands {
+		t.Logf("Condition '%s': %d cached sysFS commands", conditionType, len(commands))
+		for i, cmd := range commands {
+			t.Logf("  SysFS command %d: Path='%s', Value='%s'", i+1, cmd.Path, cmd.Value)
+			if cmd.Description != "" {
+				t.Logf("    Description: %s", cmd.Description)
+			}
+			assert.NotEmpty(t, cmd.Path, "Command path should not be empty")
+			assert.NotEmpty(t, cmd.Value, "Command value should not be empty")
+
+			// Verify that interface templating was resolved
+			if strings.Contains(cmd.Path, "{interface}") {
+				t.Errorf("Command path still contains unresolved template: %s", cmd.Path)
+			}
+		}
+	}
+
+	if len(enrichedConfig.sysFSCommands) == 0 {
+		t.Logf("No cached sysFS commands found in any condition")
+	}
+
+	// Test applying cached sysFS commands
+	t.Run("apply_cached_sysfs_commands", func(t *testing.T) {
+		// Create some test commands
+		testCommands := []SysFSCommand{
+			{
+				Path:        "/sys/class/net/ens4f1/device/ptp/ptp0/period",
+				Value:       "2 0 0 1 0",
+				Description: "Test PTP period configuration",
+			},
+			{
+				Path:        "/sys/class/net/ens4f1/carrier",
+				Value:       "1",
+				Description: "Test carrier configuration",
+			},
+		}
+
+		// Apply the cached commands
+		err := hcm.applyCachedSysFSCommands(testCommands, "test", "test-profile")
+		assert.NoError(t, err, "Should be able to apply cached sysFS commands")
+	})
+
+	t.Logf("✅ SysFS command caching test completed successfully")
 }
