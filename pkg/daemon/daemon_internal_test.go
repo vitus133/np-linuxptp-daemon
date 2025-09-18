@@ -44,14 +44,6 @@ func clean(t *testing.T) {
 	assert.NoError(t, err)
 }
 func applyTestProfile(t *testing.T, profile *ptpv1.PtpProfile) {
-	// Set up mock DPLL pins for testing
-	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
-	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
-		// Continue with test as DPLL pins are optional
-	}
-	defer hardwareconfig.TeardownMockDpllPinsForTests()
-
 	stopCh := make(<-chan struct{})
 	assert.NoError(t, leap.MockLeapFile())
 	defer func() {
@@ -122,14 +114,6 @@ func Test_applyProfile_synce(t *testing.T) {
 
 func Test_applyProfile_TBC(t *testing.T) {
 	defer clean(t)
-
-	// Set up mock DPLL pins for testing
-	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
-	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
-		// Continue with test as DPLL pins are optional
-	}
-	defer hardwareconfig.TeardownMockDpllPinsForTests()
 
 	testDataFiles := []string{
 		"testdata/profile-tbc-tt.yaml",

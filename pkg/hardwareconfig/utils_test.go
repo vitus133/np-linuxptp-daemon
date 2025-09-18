@@ -223,7 +223,7 @@ func loadTestPinsFromFile(filename string) ([]*dpll.PinInfo, error) {
 }
 
 // GetDpllPinsMock is a testable version of GetDpllPins that accepts a dialer function
-func GetDpllPinsMock(dialer MockDpllDialer) ([]*dpll.PinInfo, error) {
+func GetDpllPinsMock(dialer MockDpllDialer) (*PinCache, error) {
 	conn, err := dialer(nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial DPLL: %v", err)
@@ -236,7 +236,20 @@ func GetDpllPinsMock(dialer MockDpllDialer) ([]*dpll.PinInfo, error) {
 		return nil, fmt.Errorf("failed to dump DPLL pins: %v", err)
 	}
 
-	return dpllPins, nil
+	cache := &PinCache{
+		Pins: make(map[uint64]map[string][]dpll.PinParentDevice),
+	}
+	for _, pin := range dpllPins {
+		if pin.BoardLabel == "" {
+			continue
+		}
+		if cache.Pins[pin.ClockID] == nil {
+			cache.Pins[pin.ClockID] = make(map[string][]dpll.PinParentDevice)
+		}
+		cache.Pins[pin.ClockID][pin.BoardLabel] = pin.ParentDevice
+	}
+
+	return cache, nil
 }
 
 // TestGetDpllPins tests the GetDpllPins function with mock DPLL data
@@ -270,7 +283,7 @@ func TestGetDpllPins(t *testing.T) {
 				err:  nil,
 			},
 			expectError:  false,
-			expectedPins: 51, // Total pins in testdata/pins.json
+			expectedPins: 39, // Pins with non-empty board labels in testdata/pins.json
 			description:  "Should successfully retrieve DPLL pins",
 		},
 		{
@@ -334,20 +347,24 @@ func TestGetDpllPins(t *testing.T) {
 				if err != nil {
 					t.Errorf("Unexpected error: %v", err)
 				} else {
-					if len(result) != tc.expectedPins {
-						t.Errorf("Expected %d pins, got %d", tc.expectedPins, len(result))
+					if result.Count() != tc.expectedPins {
+						t.Errorf("Expected %d pins, got %d", tc.expectedPins, result.Count())
 					} else {
-						t.Logf("✅ Successfully retrieved %d DPLL pins", len(result))
+						t.Logf("✅ Successfully retrieved %d DPLL pins", result.Count())
 
 						// Validate pin data for successful cases
-						if len(result) > 0 {
-							for i, pin := range result {
-								t.Logf("   Pin %d: ID=%d, ClockID=%d, BoardLabel=%s, Type=%d",
-									i+1, pin.ID, pin.ClockID, pin.BoardLabel, pin.Type)
+						if result.Count() > 0 {
+							pinCount := 0
+							for clockID, clockPins := range result.Pins {
+								for boardLabel, parentDevices := range clockPins {
+									pinCount++
+									t.Logf("   Pin %d: ClockID=0x%x, BoardLabel=%s, ParentDevices=%d",
+										pinCount, clockID, boardLabel, len(parentDevices))
 
-								// Validate key fields - ID can be 0 in some cases, so we don't check for that
-								if pin.ModuleName == "" {
-									t.Errorf("Pin %d has empty ModuleName", i)
+									// Validate key fields
+									if boardLabel == "" {
+										t.Errorf("Pin %d has empty BoardLabel", pinCount)
+									}
 								}
 							}
 						}
@@ -368,74 +385,38 @@ func TestGetDpllPins(t *testing.T) {
 			return mockConn, nil
 		}
 
-		pins, err := GetDpllPinsMock(mockDialer)
+		cache, err := GetDpllPinsMock(mockDialer)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
 		// Validate specific pin characteristics from the real test data
-		if len(pins) >= 7 {
-			// Find and validate CVL-SDP22 pin (ID=0)
-			var cvlPin *dpll.PinInfo
-			for _, pin := range pins {
-				if pin.BoardLabel == "CVL-SDP22" && pin.ID == 0 {
-					cvlPin = pin
-					break
+		if cache.Count() >= 7 {
+			// Find and validate CVL-SDP22 pin
+			cvlPin, cvlFound := cache.GetPin(0x507c6fffff5c4ae8, "CVL-SDP22")
+			if cvlFound {
+				if len(cvlPin) != 2 {
+					t.Errorf("Expected CVL-SDP22 to have 2 parent devices, got %d", len(cvlPin))
 				}
-			}
-			if cvlPin != nil {
-				if cvlPin.Type != 4 {
-					t.Errorf("Expected CVL-SDP22 Type 4 (int-oscillator), got %d", cvlPin.Type)
-				}
-				if cvlPin.ModuleName != "ice" {
-					t.Errorf("Expected CVL-SDP22 ModuleName 'ice', got '%s'", cvlPin.ModuleName)
-				}
-				if len(cvlPin.ParentDevice) != 2 {
-					t.Errorf("Expected CVL-SDP22 to have 2 parent devices, got %d", len(cvlPin.ParentDevice))
-				}
-				t.Logf("✅ CVL-SDP22 pin validation passed")
+				t.Logf("✅ CVL-SDP22 pin validation passed: ParentDevices=%d", len(cvlPin))
 			} else {
 				t.Errorf("CVL-SDP22 pin not found")
 			}
 
-			// Find and validate GNSS-1PPS pin (ID=6)
-			var gnssPin *dpll.PinInfo
-			for _, pin := range pins {
-				if pin.BoardLabel == "GNSS-1PPS" && pin.ID == 6 {
-					gnssPin = pin
-					break
-				}
-			}
-			if gnssPin != nil {
-				if gnssPin.Type != 5 {
-					t.Errorf("Expected GNSS-1PPS Type 5 (GNSS), got %d", gnssPin.Type)
-				}
-				if gnssPin.Frequency != 1 {
-					t.Errorf("Expected GNSS-1PPS Frequency 1, got %d", gnssPin.Frequency)
-				}
-				t.Logf("✅ GNSS-1PPS pin validation passed")
+			// Find and validate GNSS-1PPS pin
+			gnssPin, gnssFound := cache.GetPin(0x507c6fffff5c4ae8, "GNSS-1PPS")
+			if gnssFound {
+				t.Logf("✅ GNSS-1PPS pin validation passed: ParentDevices=%d", len(gnssPin))
 			} else {
 				t.Errorf("GNSS-1PPS pin not found")
 			}
 
-			// Find and validate SMA1 pin (ID=4)
-			var smaPin *dpll.PinInfo
-			for _, pin := range pins {
-				if pin.BoardLabel == "SMA1" && pin.ID == 4 {
-					smaPin = pin
-					break
-				}
-			}
-			if smaPin != nil {
-				if smaPin.Type != 2 {
-					t.Errorf("Expected SMA1 Type 2 (ext), got %d", smaPin.Type)
-				}
-				if smaPin.PhaseAdjust != 7658 {
-					t.Errorf("Expected SMA1 PhaseAdjust 7658, got %d", smaPin.PhaseAdjust)
-				}
+			// Find and validate SMA1 pin
+			smaPin, smaFound := cache.GetPin(0x507c6fffff5c4ae8, "SMA1")
+			if smaFound {
 				// Check that this pin has connected state (State 1) in parent devices
 				hasConnectedState := false
-				for _, pd := range smaPin.ParentDevice {
+				for _, pd := range smaPin {
 					if pd.State == 1 { // connected
 						hasConnectedState = true
 						break
@@ -449,13 +430,8 @@ func TestGetDpllPins(t *testing.T) {
 				t.Errorf("SMA1 pin not found")
 			}
 
-			// Validate pin type distribution
-			typeCounts := make(map[uint32]int)
-			for _, pin := range pins {
-				typeCounts[pin.Type]++
-			}
-			t.Logf("✅ Pin type distribution: mux=%d, ext=%d, synce-eth-port=%d, int-oscillator=%d, gnss=%d",
-				typeCounts[1], typeCounts[2], typeCounts[3], typeCounts[4], typeCounts[5])
+			// Log cache structure
+			t.Logf("✅ Pin cache contains %d total pins across %d clock IDs", cache.Count(), len(cache.Pins))
 		}
 	})
 }
@@ -531,21 +507,17 @@ func TestDpllPinsGetterInjection(t *testing.T) {
 				if err != nil {
 					t.Errorf("Unexpected error: %v", err)
 				} else {
-					if len(result) != tc.expectedPins {
-						t.Errorf("Expected %d pins, got %d", tc.expectedPins, len(result))
+					if result.Count() != tc.expectedPins {
+						t.Errorf("Expected %d pins, got %d", tc.expectedPins, result.Count())
 					} else {
-						t.Logf("✅ Successfully got %d pins from mock", len(result))
-						if len(result) > 0 {
-							pin := result[0]
-							t.Logf("   Mock pin: ID=%d, ClockID=0x%x, BoardLabel=%s",
-								pin.ID, pin.ClockID, pin.BoardLabel)
-
-							// Validate mock pin data
-							if pin.ID != 100 {
-								t.Errorf("Expected mock pin ID 100, got %d", pin.ID)
-							}
-							if pin.BoardLabel != "TEST-PIN" {
-								t.Errorf("Expected mock pin BoardLabel 'TEST-PIN', got '%s'", pin.BoardLabel)
+						t.Logf("✅ Successfully got %d pins from mock", result.Count())
+						if result.Count() > 0 {
+							// For the test pin, check if it exists in the cache
+							parentDevices, found := result.GetPin(0x1234567890abcdef, "TEST-PIN")
+							if found {
+								t.Logf("   Mock pin: ClockID=0x1234567890abcdef, BoardLabel=TEST-PIN, ParentDevices=%d", len(parentDevices))
+							} else {
+								t.Errorf("Expected to find test pin with ClockID=0x1234567890abcdef and BoardLabel=TEST-PIN")
 							}
 						}
 					}
@@ -576,37 +548,30 @@ func TestDpllPinsGetterFromFile(t *testing.T) {
 	SetDpllPinsGetter(mockGetter)
 
 	// Test the injection
-	pins, err := GetDpllPins()
+	cache, err := GetDpllPins()
 	if err != nil {
 		t.Fatalf("Unexpected error from mock getter: %v", err)
 	}
 
-	if len(pins) != 51 {
-		t.Errorf("Expected 51 pins from test file, got %d", len(pins))
+	if cache.Count() != 39 {
+		t.Errorf("Expected 39 pins from test file, got %d", cache.Count())
 	}
 
-	t.Logf("✅ Successfully loaded %d pins from test file via mock getter", len(pins))
+	t.Logf("✅ Successfully loaded %d pins from test file via mock getter", cache.Count())
 
 	// Validate some pins from the test file
-	var cvlPin, gnssPin *dpll.PinInfo
-	for _, pin := range pins {
-		if pin.BoardLabel == "CVL-SDP22" && pin.ID == 0 {
-			cvlPin = pin
-		}
-		if pin.BoardLabel == "GNSS-1PPS" && pin.ID == 6 {
-			gnssPin = pin
-		}
-	}
+	cvlPin, cvlFound := cache.GetPin(0x507c6fffff5c4ae8, "CVL-SDP22")
+	gnssPin, gnssFound := cache.GetPin(0x507c6fffff5c4ae8, "GNSS-1PPS")
 
-	if cvlPin == nil {
+	if !cvlFound {
 		t.Errorf("Expected to find CVL-SDP22 pin in mock data")
 	} else {
-		t.Logf("✅ Found CVL-SDP22 pin: Type=%d, ClockID=0x%x", cvlPin.Type, cvlPin.ClockID)
+		t.Logf("✅ Found CVL-SDP22 pin: ParentDevices=%d", len(cvlPin))
 	}
 
-	if gnssPin == nil {
+	if !gnssFound {
 		t.Errorf("Expected to find GNSS-1PPS pin in mock data")
 	} else {
-		t.Logf("✅ Found GNSS-1PPS pin: Type=%d, Frequency=%d", gnssPin.Type, gnssPin.Frequency)
+		t.Logf("✅ Found GNSS-1PPS pin: ParentDevices=%d", len(gnssPin))
 	}
 }

@@ -22,6 +22,7 @@ type HardwareConfigUpdateHandler interface {
 //nolint:revive // Name is part of established API
 type HardwareConfigManager struct {
 	hardwareConfigs []types.HardwareConfig
+	pinCache        map[string]map[string]string
 }
 
 // NewHardwareConfigManager creates a new hardware config manager
@@ -253,45 +254,6 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 // applyDPLLDesiredState applies DPLL pin configurations
 func (hcm *HardwareConfigManager) applyDPLLDesiredState(dpllDesiredState types.DPLLDesiredState, _, _ string) error {
 	glog.Infof("  DPLL Configuration - Clock ID: %s, Board Label: %s", dpllDesiredState.ClockID, dpllDesiredState.BoardLabel)
-
-	// Apply EEC pin state if specified
-	if dpllDesiredState.EEC != nil {
-		if err := hcm.applyPinState("EEC", dpllDesiredState.EEC, dpllDesiredState.ClockID, dpllDesiredState.BoardLabel); err != nil {
-			return fmt.Errorf("failed to apply EEC pin state: %w", err)
-		}
-	}
-
-	// Apply PPS pin state if specified
-	if dpllDesiredState.PPS != nil {
-		if err := hcm.applyPinState("PPS", dpllDesiredState.PPS, dpllDesiredState.ClockID, dpllDesiredState.BoardLabel); err != nil {
-			return fmt.Errorf("failed to apply PPS pin state: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// applyPinState applies a pin state configuration (EEC or PPS)
-//
-//nolint:unparam // TODO implementation always returns nil for now
-func (hcm *HardwareConfigManager) applyPinState(pinType string, pinState *types.PinState, clockID, boardLabel string) error {
-	glog.Infof("    %s pin - Clock ID: %s, Board Label: %s", pinType, clockID, boardLabel)
-
-	if pinState.Priority != nil {
-		glog.Infof("      Setting priority: %d", *pinState.Priority)
-		// TODO: Implement actual priority setting through hardware plugin or netlink
-	}
-
-	if pinState.State != "" {
-		glog.Infof("      Setting state: %s", pinState.State)
-		// TODO: Implement actual state setting through hardware plugin or netlink
-	}
-
-	// TODO: Implement actual hardware configuration calls
-	// This would involve:
-	// 1. Identifying the correct hardware plugin based on clockID/boardLabel
-	// 2. Calling the plugin's pin configuration methods
-	// 3. Or using netlink calls directly to configure DPLL pins
 
 	return nil
 }
