@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -103,6 +104,9 @@ type ClockIdentifier struct {
 	// ClockID is the actual clock ID (decimal or hex)
 	ClockID string `json:"clockId"`
 
+	// ClockIDParsed is the parsed uint64 value of ClockID (populated during processing)
+	ClockIDParsed uint64 `json:"-"`
+
 	// Description is optional context for the mapping
 	Description string `json:"description,omitempty"`
 }
@@ -141,6 +145,9 @@ type SourceConfig struct {
 
 	// ClockID is the subsystem clock ID (decimal or hex format: "5799633565432596414" or "0xaabbccfffeddeeff")
 	ClockID string `json:"clockId"`
+
+	// ClockIDParsed is the parsed uint64 value of ClockID (populated during processing)
+	ClockIDParsed uint64 `json:"-"`
 
 	// SourceType identifies the source type. Valid values: "ptpTimeReceiver", "gnss"
 	// If sourceType is ptpTimeReceiver, ptpTimeReceivers must be specified.
@@ -198,6 +205,9 @@ type DesiredState struct {
 type DPLLDesiredState struct {
 	// ClockID is the subsystem clock ID (decimal or hex format)
 	ClockID string `json:"clockId,omitempty"`
+
+	// ClockIDParsed is the parsed uint64 value of ClockID (populated during processing)
+	ClockIDParsed uint64 `json:"-"`
 
 	// BoardLabel and clock ID together unambiguously identify the subsystem and the DPLL pin,
 	// together with an optional external connector, if defined.
@@ -266,6 +276,9 @@ type DPLL struct {
 	// ClockID is an optional clock ID. If omitted, the hardware must support clock ID discovery.
 	// Format: decimal or hex ("5799633565432596414" or "0xaabbccfffeddeeff")
 	ClockID string `json:"clockId,omitempty"`
+
+	// ClockIDParsed is the parsed uint64 value of ClockID (populated during processing)
+	ClockIDParsed uint64 `json:"-"`
 
 	// PhaseInputs are phase reference input pins, keyed by board label
 	PhaseInputs map[string]PinConfig `json:"phaseInputs,omitempty"`
@@ -348,6 +361,55 @@ func ValidateClockID(clockID string) error {
 	return fmt.Errorf("invalid clock ID format: %s (must be decimal or hex)", clockID)
 }
 
+// ParseClockID parses a clock ID string (decimal or hexadecimal) to uint64
+func ParseClockID(clockID string) (uint64, error) {
+	if clockID == "" {
+		return 0, fmt.Errorf("empty clock ID")
+	}
+
+	// Validate format first
+	if err := ValidateClockID(clockID); err != nil {
+		return 0, err
+	}
+
+	// Parse hexadecimal format (0x or 0X prefix)
+	if strings.HasPrefix(strings.ToLower(clockID), "0x") {
+		value, err := strconv.ParseUint(clockID, 0, 64)
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse hexadecimal clock ID '%s': %w", clockID, err)
+		}
+		return value, nil
+	}
+
+	// Parse decimal format
+	value, err := strconv.ParseUint(clockID, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse decimal clock ID '%s': %w", clockID, err)
+	}
+	return value, nil
+}
+
+// ParseClockIDSafe parses a clock ID string and returns both the uint64 value and string representation
+// This is useful when you need both formats for different operations
+func ParseClockIDSafe(clockID string) (uint64, string, error) {
+	if clockID == "" {
+		return 0, "", fmt.Errorf("empty clock ID")
+	}
+
+	// Validate format first
+	if err := ValidateClockID(clockID); err != nil {
+		return 0, "", err
+	}
+
+	// Parse to uint64
+	value, err := ParseClockID(clockID)
+	if err != nil {
+		return 0, "", err
+	}
+
+	return value, clockID, nil
+}
+
 // ValidateAlphanumDash validates alphanumeric characters with dashes and underscores
 func ValidateAlphanumDash(value string) error {
 	pattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -407,6 +469,17 @@ func (cc *ClockChain) ResolveClockAliases() error {
 		return err
 	}
 
+	// Parse clock identifiers to uint64 values
+	for i := range cc.CommonDefinitions.ClockIdentifiers {
+		if cc.CommonDefinitions.ClockIdentifiers[i].ClockID != "" {
+			parsed, err := ParseClockID(cc.CommonDefinitions.ClockIdentifiers[i].ClockID)
+			if err != nil {
+				return fmt.Errorf("commonDefinitions.clockIdentifiers[%d].clockId: %w", i, err)
+			}
+			cc.CommonDefinitions.ClockIdentifiers[i].ClockIDParsed = parsed
+		}
+	}
+
 	// Resolve DPLL clock IDs
 	for si := range cc.Structure {
 		if cc.Structure[si].DPLL.ClockID != "" {
@@ -415,6 +488,13 @@ func (cc *ClockChain) ResolveClockAliases() error {
 				return fmt.Errorf("structure[%d] DPLL.clockId: %w", si, err)
 			}
 			cc.Structure[si].DPLL.ClockID = resolved
+
+			// Parse the resolved clock ID to uint64
+			parsed, err := ParseClockID(resolved)
+			if err != nil {
+				return fmt.Errorf("structure[%d] DPLL.clockId parse: %w", si, err)
+			}
+			cc.Structure[si].DPLL.ClockIDParsed = parsed
 		}
 	}
 
@@ -429,6 +509,13 @@ func (cc *ClockChain) ResolveClockAliases() error {
 			return fmt.Errorf("behavior.sources[%d].clockId: %w", i, err)
 		}
 		cc.Behavior.Sources[i].ClockID = resolved
+
+		// Parse the resolved clock ID to uint64
+		parsed, err := ParseClockID(resolved)
+		if err != nil {
+			return fmt.Errorf("behavior.sources[%d].clockId parse: %w", i, err)
+		}
+		cc.Behavior.Sources[i].ClockIDParsed = parsed
 	}
 
 	// Resolve desired state clock IDs
@@ -443,6 +530,13 @@ func (cc *ClockChain) ResolveClockAliases() error {
 					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId: %w", ci, di, err)
 				}
 				desiredState.DPLL.ClockID = resolved
+
+				// Parse the resolved clock ID to uint64
+				parsed, err := ParseClockID(resolved)
+				if err != nil {
+					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId parse: %w", ci, di, err)
+				}
+				desiredState.DPLL.ClockIDParsed = parsed
 			}
 		}
 	}

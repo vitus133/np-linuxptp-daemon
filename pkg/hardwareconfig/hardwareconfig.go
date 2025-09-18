@@ -38,6 +38,15 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 	glog.Infof("Received hardware configuration update with %d hardware configs", len(hwConfigs))
 	var err error
 
+	// Resolve clock ID aliases in each hardware config before storing them
+	for i := range hwConfigs {
+		if hwConfigs[i].Spec.Profile.ClockChain != nil {
+			if err := hwConfigs[i].Spec.Profile.ClockChain.ResolveClockAliases(); err != nil {
+				return fmt.Errorf("failed to resolve clock aliases in hardware config %d: %w", i, err)
+			}
+		}
+	}
+
 	// Store the hardware configs for use during daemon restart
 	hcm.hardwareConfigs = make([]types.HardwareConfig, len(hwConfigs))
 	copy(hcm.hardwareConfigs, hwConfigs)

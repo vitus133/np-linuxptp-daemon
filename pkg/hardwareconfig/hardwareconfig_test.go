@@ -18,6 +18,14 @@ import (
 )
 
 func TestApplyHardwareConfigsForProfile(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
 	tests := []struct {
 		name          string
 		testDataFile  string
@@ -73,6 +81,14 @@ func TestApplyHardwareConfigsForProfile(t *testing.T) {
 }
 
 func TestHardwareConfigManagerOperations(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
 	hcm := NewHardwareConfigManager()
 
 	// Test initial state
@@ -111,6 +127,14 @@ func TestHardwareConfigManagerOperations(t *testing.T) {
 }
 
 func TestHardwareConfigManagerEmptyConfigs(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
 	hcm := NewHardwareConfigManager()
 
 	// Test with empty configs
@@ -180,6 +204,14 @@ func TestNewHardwareConfigManager(t *testing.T) {
 }
 
 func TestPTPStateDetector(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
 	// Load test data
 	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err)
@@ -203,6 +235,14 @@ func TestPTPStateDetector(t *testing.T) {
 }
 
 func TestDetectStateChange(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
 	// Load test data
 	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err)
