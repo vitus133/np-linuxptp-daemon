@@ -2,6 +2,9 @@ package hardwareconfig
 
 import (
 	"fmt"
+	"time"
+
+	"github.com/golang/glog"
 
 	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 )
@@ -32,7 +35,7 @@ func GetDpllPins() (*PinCache, error) {
 
 // PinCache is a cache of DPLL pins with O1 access, hashed by clock ID and board label
 type PinCache struct {
-	Pins map[uint64]map[string][]dpll.PinParentDevice
+	Pins map[uint64]map[string]dpll.PinInfo
 }
 
 // Count returns the total number of pins in the cache
@@ -44,11 +47,11 @@ func (pc *PinCache) Count() int {
 	return count
 }
 
-// GetPin returns the parent devices for a specific clock ID and board label
-func (pc *PinCache) GetPin(clockID uint64, boardLabel string) ([]dpll.PinParentDevice, bool) {
+// GetPin returns the pin info for a specific clock ID and board label
+func (pc *PinCache) GetPin(clockID uint64, boardLabel string) (*dpll.PinInfo, bool) {
 	if clockPins, exists := pc.Pins[clockID]; exists {
-		if parentDevices, exists := clockPins[boardLabel]; exists {
-			return parentDevices, true
+		if pinInfo, exists := clockPins[boardLabel]; exists {
+			return &pinInfo, true
 		}
 	}
 	return nil, false
@@ -67,16 +70,16 @@ func getRealDpllPins() (*PinCache, error) {
 		return nil, fmt.Errorf("failed to dump DPLL pins: %v", err)
 	}
 	cache := &PinCache{
-		Pins: make(map[uint64]map[string][]dpll.PinParentDevice),
+		Pins: make(map[uint64]map[string]dpll.PinInfo),
 	}
 	for _, pin := range dpllPins {
 		if pin.BoardLabel == "" {
 			continue
 		}
 		if cache.Pins[pin.ClockID] == nil {
-			cache.Pins[pin.ClockID] = make(map[string][]dpll.PinParentDevice)
+			cache.Pins[pin.ClockID] = make(map[string]dpll.PinInfo)
 		}
-		cache.Pins[pin.ClockID][pin.BoardLabel] = pin.ParentDevice
+		cache.Pins[pin.ClockID][pin.BoardLabel] = *pin
 	}
 	return cache, nil
 }
@@ -88,16 +91,16 @@ func CreateMockDpllPinsGetter(pins []*dpll.PinInfo, returnError error) DpllPinsG
 			return nil, returnError
 		}
 		cache := &PinCache{
-			Pins: make(map[uint64]map[string][]dpll.PinParentDevice),
+			Pins: make(map[uint64]map[string]dpll.PinInfo),
 		}
 		for _, pin := range pins {
 			if pin.BoardLabel == "" {
 				continue
 			}
 			if cache.Pins[pin.ClockID] == nil {
-				cache.Pins[pin.ClockID] = make(map[string][]dpll.PinParentDevice)
+				cache.Pins[pin.ClockID] = make(map[string]dpll.PinInfo)
 			}
-			cache.Pins[pin.ClockID][pin.BoardLabel] = pin.ParentDevice
+			cache.Pins[pin.ClockID][pin.BoardLabel] = *pin
 		}
 		return cache, nil
 	}
@@ -114,54 +117,54 @@ type PinControl struct {
 	ParentControl PinParentControl
 }
 
-const (
-	eecDpllIndex = 0
-	ppsDpllIndex = 1
-)
+// GetPinState returns DPLL pin state as a string
+func GetPinStateUint32(s string) (uint32, error) {
+	stateMap := map[string]uint32{
+		"connected":    dpll.PinStateConnected,
+		"disconnected": dpll.PinStateDisconnected,
+		"selectable":   dpll.PinStateSelectable,
+	}
+	r, found := stateMap[s]
+	if found {
+		return r, nil
+	}
+	return 0, fmt.Errorf("invalid pin state: %s", s)
+}
 
-// func SetPinsControl(pins []PinControl) (*[]dpll.PinParentDeviceCtl, error) {
-// 	pinCommands := []dpll.PinParentDeviceCtl{}
-// 	for _, pinCtl := range pins {
-// 		dpllPin, found := c.LeadingNIC.Pins[pinCtl.Label]
-// 		if !found {
-// 			return nil, fmt.Errorf("%s pin not found in the leading card", pinCtl.Label)
-// 		}
-// 		pinCommand := SetPinControlData(dpllPin, pinCtl.ParentControl)
-// 		pinCommands = append(pinCommands, *pinCommand)
-// 	}
-// 	return &pinCommands, nil
-// }
+func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
+	conn, err := dpll.Dial(nil)
+	if err != nil {
+		return fmt.Errorf("failed to dial DPLL: %v", err)
+	}
+	//nolint:errcheck
+	defer conn.Close()
+	for _, command := range *commands {
+		glog.Infof("DPLL pin command %++v", command)
+		b, err := dpll.EncodePinControl(command)
+		if err != nil {
+			return err
+		}
+		err = conn.SendCommand(dpll.DpllCmdPinSet, b)
+		if err != nil {
+			glog.Error("failed to send pin command: ", err)
+			return err
+		}
+		info, err := conn.DoPinGet(dpll.DoPinGetRequest{ID: command.ID})
+		if err != nil {
+			glog.Error("failed to get pin: ", err)
+			return err
+		}
+		reply, err := dpll.GetPinInfoHR(info, time.Now())
+		if err != nil {
+			glog.Error("failed to convert pin reply to human readable: ", err)
+			return err
+		}
+		glog.Info("pin reply: ", string(reply))
+	}
+	return nil
+}
 
-// func SetPinControlData(pin dpll.PinInfo, control PinParentControl) *dpll.PinParentDeviceCtl {
-// 	Pin := dpll.PinParentDeviceCtl{
-// 		ID:           pin.ID,
-// 		PinParentCtl: make([]dpll.PinControl, 0),
-// 	}
-
-// 	for deviceIndex, parentDevice := range pin.ParentDevice {
-// 		var prio uint32
-// 		var outputState uint32
-// 		pc := dpll.PinControl{}
-// 		pc.PinParentID = parentDevice.ParentID
-// 		switch deviceIndex {
-// 		case eecDpllIndex:
-// 			prio = uint32(control.EecPriority)
-// 			outputState = uint32(control.EecOutputState)
-// 		case ppsDpllIndex:
-// 			prio = uint32(control.PpsPriority)
-// 			outputState = uint32(control.PpsOutputState)
-// 		}
-// 		if parentDevice.Direction == dpll.PinDirectionInput {
-// 			pc.Prio = &prio
-// 		} else {
-// 			pc.State = &outputState
-// 		}
-// 		Pin.PinParentCtl = append(Pin.PinParentCtl, pc)
-// 	}
-// 	return &Pin
-// }
-
-// SetupMockDpllPinsForTests sets up mock DPLL pins for daemon tests using test file data
+// SetupMockDpllPinsForTests sets up mock DPLL pins for daemon tests using simple test data
 func SetupMockDpllPinsForTests() error {
 	// Create simple mock data for tests that don't need real pin data
 	mockPins := []*dpll.PinInfo{

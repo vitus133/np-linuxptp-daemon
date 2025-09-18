@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/golang/glog"
+	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 )
@@ -17,18 +18,23 @@ type HardwareConfigUpdateHandler interface {
 	UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error
 }
 
+type enrichedHardwareConfig struct {
+	types.HardwareConfig
+	dpllPinCommands map[string][]dpll.PinParentDeviceCtl
+}
+
 // HardwareConfigManager manages hardware configurations and their application
 //
 //nolint:revive // Name is part of established API
 type HardwareConfigManager struct {
-	hardwareConfigs []types.HardwareConfig
+	hardwareConfigs []enrichedHardwareConfig
 	pinCache        *PinCache
 }
 
 // NewHardwareConfigManager creates a new hardware config manager
 func NewHardwareConfigManager() *HardwareConfigManager {
 	return &HardwareConfigManager{
-		hardwareConfigs: make([]types.HardwareConfig, 0),
+		hardwareConfigs: make([]enrichedHardwareConfig, 0),
 	}
 }
 
@@ -47,62 +53,26 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 		}
 	}
 
-	// Store the hardware configs for use during daemon restart
-	hcm.hardwareConfigs = make([]types.HardwareConfig, len(hwConfigs))
-	copy(hcm.hardwareConfigs, hwConfigs)
+	// Get DPLL pins for processing
 	hcm.pinCache, err = GetDpllPins()
 	if err != nil {
 		return fmt.Errorf("failed to get DPLL pins: %w", err)
 	}
 
-	// Log the hardware configurations for debugging
+	// Store the hardware configs as enriched configs for use during daemon restart
+	hcm.hardwareConfigs = make([]enrichedHardwareConfig, len(hwConfigs))
 	for i, hwConfig := range hwConfigs {
-		profile := hwConfig.Spec.Profile
-		profileName := "unnamed"
-		if profile.Name != nil {
-			profileName = *profile.Name
+		hcm.hardwareConfigs[i] = enrichedHardwareConfig{
+			HardwareConfig: hwConfig,
 		}
-
-		glog.Infof("Hardware config %d: %s (Related PTP: %s)", i, profileName, hwConfig.Spec.RelatedPtpProfileName)
-
-		if profile.Description != nil {
-			glog.Infof("  Description: %s", *profile.Description)
+		commands, err := hcm.resolveClockChainBehavior(hwConfig)
+		if err != nil {
+			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, err)
 		}
+		hcm.hardwareConfigs[i].dpllPinCommands = commands
 
-		if profile.ClockChain != nil {
-			glog.Infof("  Clock chain with %d subsystems", len(profile.ClockChain.Structure))
-
-			// Log basic information about each subsystem
-			for j, subsystem := range profile.ClockChain.Structure {
-				plugin := subsystem.HardwarePlugin
-				if plugin == "" {
-					plugin = "default"
-				}
-				glog.Infof("    Subsystem %d: %s (Plugin: %s, Clock ID: %s)",
-					j, subsystem.Name, plugin, subsystem.DPLL.ClockID)
-			}
-
-			// Log behavior information if present
-			if profile.ClockChain.Behavior != nil {
-				glog.Infof("  Behavior: %d sources, %d conditions",
-					len(profile.ClockChain.Behavior.Sources),
-					len(profile.ClockChain.Behavior.Conditions))
-			}
-		}
 	}
 
-	return nil
-}
-
-// UpdateHardwareConfigWithNotification updates hardware configs and notifies state detector to rebuild caches
-func (hcm *HardwareConfigManager) UpdateHardwareConfigWithNotification(hwConfigs []types.HardwareConfig, psd *PTPStateDetector) error {
-	err := hcm.UpdateHardwareConfig(hwConfigs)
-	if err != nil {
-		return err
-	}
-	if psd != nil {
-		psd.buildCaches()
-	}
 	return nil
 }
 
@@ -169,6 +139,114 @@ func (hcm *HardwareConfigManager) ApplyHardwareConfigsForProfile(nodeProfile *pt
 	// For now, return an error to indicate that plugins should be called as fallback
 	glog.Infof("TODO: Hardware config application not yet implemented, plugins should be called as fallback")
 	return fmt.Errorf("hardware config application not implemented, use plugin fallback")
+}
+
+func (hcm *HardwareConfigManager) resolveClockChainBehavior(hwConfig types.HardwareConfig) (map[string][]dpll.PinParentDeviceCtl, error) {
+	clockChain := hwConfig.Spec.Profile.ClockChain
+	conditions := hcm.extractConditionByType(clockChain)
+	pinCommandsPerCondition := make(map[string][]dpll.PinParentDeviceCtl)
+	for conditionName, condition := range conditions {
+		pinCommands, err := hcm.resolveDpllPinCommands(condition)
+		if err != nil {
+			return pinCommandsPerCondition, fmt.Errorf("failed to resolve DPLL pin commands for condition %s: %w", condition.Name, err)
+		}
+		pinCommandsPerCondition[conditionName] = pinCommands
+	}
+	return pinCommandsPerCondition, nil
+}
+
+func (hcm *HardwareConfigManager) resolveDpllPinCommands(condition types.Condition) ([]dpll.PinParentDeviceCtl, error) {
+	pinCommands := []dpll.PinParentDeviceCtl{}
+	for _, desiredState := range condition.DesiredStates {
+		if desiredState.DPLL != nil {
+			pinCommand, err := hcm.createPinCommandForDPLLDesiredState(*desiredState.DPLL)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create pin command for DPLL desired state: %w", err)
+			}
+			pinCommands = append(pinCommands, pinCommand)
+		}
+	}
+	return pinCommands, nil
+}
+
+func (hcm *HardwareConfigManager) extractConditionByType(clockChain *types.ClockChain) map[string]types.Condition {
+	conditions := make(map[string]types.Condition)
+
+	if clockChain.Behavior == nil || len(clockChain.Behavior.Conditions) == 0 {
+		return conditions
+	}
+
+	for _, condition := range clockChain.Behavior.Conditions {
+		if len(condition.Sources) == 0 {
+			// Treat conditions with empty sources as "init" conditions
+			conditions["init"] = condition
+			continue
+		}
+		switch condition.Sources[0].ConditionType {
+		case "default":
+			conditions["default"] = condition
+		case "init":
+			conditions["init"] = condition
+		case "locked":
+			conditions["locked"] = condition
+		case "lost":
+			conditions["lost"] = condition
+		}
+	}
+	return conditions
+}
+
+func (hcm *HardwareConfigManager) createPinCommandForDPLLDesiredState(dpllDesiredState types.DPLLDesiredState) (dpll.PinParentDeviceCtl, error) {
+	// Find the pin in the cache
+	pin, found := hcm.pinCache.GetPin(dpllDesiredState.ClockIDParsed, dpllDesiredState.BoardLabel)
+	if !found {
+		return dpll.PinParentDeviceCtl{}, fmt.Errorf("DPLL pin not found in cache")
+	}
+
+	// Create the pin command
+	pinCommand := dpll.PinParentDeviceCtl{
+		ID:           pin.ID,
+		PinParentCtl: make([]dpll.PinControl, 0),
+	}
+
+	// Add pin controls for each parent device
+	for _, parentDevice := range pin.ParentDevice {
+		pc := dpll.PinControl{
+			PinParentID: parentDevice.ParentID,
+		}
+
+		// Set priority or state based on direction and desired state
+		if parentDevice.Direction == dpll.PinDirectionInput {
+			if dpllDesiredState.EEC != nil && dpllDesiredState.EEC.Priority != nil {
+				priority := uint32(*dpllDesiredState.EEC.Priority)
+				pc.Prio = &priority
+			}
+			if dpllDesiredState.PPS != nil && dpllDesiredState.PPS.Priority != nil {
+				priority := uint32(*dpllDesiredState.PPS.Priority)
+				pc.Prio = &priority
+			}
+		} else {
+			// Output pin
+			if dpllDesiredState.EEC != nil && dpllDesiredState.EEC.State != "" {
+				state, err := GetPinStateUint32(dpllDesiredState.EEC.State)
+				if err != nil {
+					return dpll.PinParentDeviceCtl{}, fmt.Errorf("invalid EEC state: %w", err)
+				}
+				pc.State = &state
+			}
+			if dpllDesiredState.PPS != nil && dpllDesiredState.PPS.State != "" {
+				state, err := GetPinStateUint32(dpllDesiredState.PPS.State)
+				if err != nil {
+					return dpll.PinParentDeviceCtl{}, fmt.Errorf("invalid PPS state: %w", err)
+				}
+				pc.State = &state
+			}
+		}
+
+		pinCommand.PinParentCtl = append(pinCommand.PinParentCtl, pc)
+	}
+
+	return pinCommand, nil
 }
 
 // applyDefaultAndInitConditions extracts and applies "default" and "init" conditions in order
@@ -258,19 +336,17 @@ func (hcm *HardwareConfigManager) applyDesiredState(desiredState types.DesiredSt
 
 	// Apply DPLL configuration if specified
 	if desiredState.DPLL != nil {
-		if err := hcm.applyDPLLDesiredState(*desiredState.DPLL, conditionName, profileName); err != nil {
-			return fmt.Errorf("failed to apply DPLL configuration: %w", err)
-		}
+		// if err := hcm.applyDPLLDesiredState(*desiredState.DPLL); err != nil {
+		// 	return fmt.Errorf("failed to apply DPLL configuration: %w", err)
+		// }
 	}
 	return nil
 }
 
-// applyDPLLDesiredState applies DPLL pin configurations
-func (hcm *HardwareConfigManager) applyDPLLDesiredState(dpllDesiredState types.DPLLDesiredState, _, _ string) error {
-	glog.Infof("  DPLL Configuration - Clock ID: %s, Board Label: %s", dpllDesiredState.ClockID, dpllDesiredState.BoardLabel)
-
-	return nil
-}
+const (
+	eecDpllIndex = 0
+	ppsDpllIndex = 1
+)
 
 // applySysFSDesiredState applies a single sysFS-based desired state configuration
 func (hcm *HardwareConfigManager) applySysFSDesiredState(sysfSDesiredState types.SysFSDesiredState, clockChain *types.ClockChain) error {
@@ -412,7 +488,7 @@ func (hcm *HardwareConfigManager) GetHardwareConfigCount() int {
 
 // ClearHardwareConfigs clears all hardware configurations
 func (hcm *HardwareConfigManager) ClearHardwareConfigs() {
-	hcm.hardwareConfigs = make([]types.HardwareConfig, 0)
+	hcm.hardwareConfigs = make([]enrichedHardwareConfig, 0)
 }
 
 // GetPTPStateDetector returns a PTP state detector for processing PTP events

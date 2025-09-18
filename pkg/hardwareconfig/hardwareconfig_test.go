@@ -18,10 +18,10 @@ import (
 )
 
 func TestApplyHardwareConfigsForProfile(t *testing.T) {
-	// Set up mock DPLL pins for testing
-	mockErr := SetupMockDpllPinsForTests()
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
 		// Continue with test as DPLL pins are optional
 	}
 	defer TeardownMockDpllPinsForTests()
@@ -81,10 +81,10 @@ func TestApplyHardwareConfigsForProfile(t *testing.T) {
 }
 
 func TestHardwareConfigManagerOperations(t *testing.T) {
-	// Set up mock DPLL pins for testing
-	mockErr := SetupMockDpllPinsForTests()
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
 		// Continue with test as DPLL pins are optional
 	}
 	defer TeardownMockDpllPinsForTests()
@@ -127,10 +127,10 @@ func TestHardwareConfigManagerOperations(t *testing.T) {
 }
 
 func TestHardwareConfigManagerEmptyConfigs(t *testing.T) {
-	// Set up mock DPLL pins for testing
-	mockErr := SetupMockDpllPinsForTests()
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
 		// Continue with test as DPLL pins are optional
 	}
 	defer TeardownMockDpllPinsForTests()
@@ -204,10 +204,10 @@ func TestNewHardwareConfigManager(t *testing.T) {
 }
 
 func TestPTPStateDetector(t *testing.T) {
-	// Set up mock DPLL pins for testing
-	mockErr := SetupMockDpllPinsForTests()
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
 		// Continue with test as DPLL pins are optional
 	}
 	defer TeardownMockDpllPinsForTests()
@@ -235,10 +235,10 @@ func TestPTPStateDetector(t *testing.T) {
 }
 
 func TestDetectStateChange(t *testing.T) {
-	// Set up mock DPLL pins for testing
-	mockErr := SetupMockDpllPinsForTests()
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
 	if mockErr != nil {
-		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
 		// Continue with test as DPLL pins are optional
 	}
 	defer TeardownMockDpllPinsForTests()
@@ -388,16 +388,37 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 
 	// Create a HardwareConfigManager
 	hcm := &HardwareConfigManager{
-		hardwareConfigs: []types.HardwareConfig{*hwConfig},
+		hardwareConfigs: []enrichedHardwareConfig{
+			{HardwareConfig: *hwConfig},
+		},
 	}
 
 	// Extract the clock chain from the loaded config
 	clockChain := hwConfig.Spec.Profile.ClockChain
 	profileName := *hwConfig.Spec.Profile.Name
 
+	// Resolve clock aliases and parse clock IDs to uint64 values
+	err = clockChain.ResolveClockAliases()
+	if err != nil {
+		t.Fatalf("Failed to resolve clock aliases: %v", err)
+	}
+
 	t.Logf("Testing with real hardware config: %s", hwConfig.ObjectMeta.Name)
 	t.Logf("Profile: %s", profileName)
 	t.Logf("Clock chain has %d conditions", len(clockChain.Behavior.Conditions))
+
+	// Validate that source configurations have been resolved and parsed
+	if clockChain.Behavior != nil && len(clockChain.Behavior.Sources) > 0 {
+		t.Logf("Validating %d behavior sources:", len(clockChain.Behavior.Sources))
+		for i, source := range clockChain.Behavior.Sources {
+			t.Logf("  Source %d: %s (ClockID: %s)", i+1, source.Name, source.ClockID)
+			if source.ClockIDParsed != 0 {
+				t.Logf("    ✅ Clock ID parsed: 0x%x", source.ClockIDParsed)
+			} else {
+				t.Logf("    ⚠️ Clock ID not parsed to uint64")
+			}
+		}
+	}
 
 	// Test each condition from the real hardware config
 	for i, condition := range clockChain.Behavior.Conditions {
@@ -415,6 +436,13 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 				if desiredState.DPLL != nil {
 					t.Logf("    Desired state %d: DPLL - Clock: %s, Board: %s",
 						j+1, desiredState.DPLL.ClockID, desiredState.DPLL.BoardLabel)
+
+					// Validate that clock ID has been parsed to uint64
+					if desiredState.DPLL.ClockIDParsed != 0 {
+						t.Logf("      Clock ID parsed: 0x%x", desiredState.DPLL.ClockIDParsed)
+					} else {
+						t.Logf("      Warning: Clock ID not parsed to uint64")
+					}
 					if desiredState.DPLL.EEC != nil {
 						if desiredState.DPLL.EEC.Priority != nil {
 							t.Logf("      EEC Priority: %d", *desiredState.DPLL.EEC.Priority)
@@ -533,6 +561,10 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 				"Leader":   "0x507c6fffff1fb1b8",
 				"Follower": "0x507c6fffff1fb580",
 			}
+			expectedParsedClockIDs := map[string]uint64{
+				"Leader":   0x507c6fffff1fb1b8,
+				"Follower": 0x507c6fffff1fb580,
+			}
 			for _, clockID := range clockIDs {
 				expectedID, exists := expectedClockIDs[clockID.Alias]
 				if !exists {
@@ -542,9 +574,200 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 				} else {
 					t.Logf("✅ Clock identifier validated: %s -> %s", clockID.Alias, clockID.ClockID)
 				}
+
+				// Validate parsed uint64 values
+				expectedParsedID, exists := expectedParsedClockIDs[clockID.Alias]
+				if !exists {
+					t.Errorf("No expected parsed clock ID for alias: %s", clockID.Alias)
+				} else if clockID.ClockIDParsed != expectedParsedID {
+					t.Errorf("Expected parsed clock ID 0x%x for %s, got 0x%x", expectedParsedID, clockID.Alias, clockID.ClockIDParsed)
+				} else {
+					t.Logf("✅ Clock identifier parsed correctly: %s -> 0x%x", clockID.Alias, clockID.ClockIDParsed)
+				}
 			}
 		}
 	})
+}
+
+// TestApplyDefaultAndInitConditions tests the applyDefaultAndInitConditions function
+func TestApplyDefaultAndInitConditions(t *testing.T) {
+	// Set up mock DPLL pins from test file for testing
+	mockErr := SetupMockDpllPinsFromFileForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins from file: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
+	// Load test hardware config
+	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
+	if err != nil {
+		t.Fatalf("Failed to load hardware config: %v", err)
+	}
+
+	// Resolve clock aliases first
+	err = hwConfig.Spec.Profile.ClockChain.ResolveClockAliases()
+	if err != nil {
+		t.Fatalf("Failed to resolve clock aliases: %v", err)
+	}
+
+	// Create hardware config manager
+	hcm := NewHardwareConfigManager()
+	err = hcm.UpdateHardwareConfig([]types.HardwareConfig{*hwConfig})
+	if err != nil {
+		t.Fatalf("Failed to update hardware config: %v", err)
+	}
+
+	profileName := "test-profile"
+	clockChain := hwConfig.Spec.Profile.ClockChain
+
+	tests := []struct {
+		name                 string
+		clockChain           *types.ClockChain
+		profileName          string
+		expectError          bool
+		expectedDefaultCount int
+		expectedInitCount    int
+	}{
+		{
+			name:                 "valid clock chain with conditions",
+			clockChain:           clockChain,
+			profileName:          profileName,
+			expectError:          false,
+			expectedDefaultCount: 0, // No explicit default conditions in test data
+			expectedInitCount:    1, // "Initialize T-BC" condition has empty sources, treated as init
+		},
+		{
+			name:        "nil behavior section",
+			clockChain:  &types.ClockChain{},
+			profileName: profileName,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test the function
+			err := hcm.applyDefaultAndInitConditions(tt.clockChain, tt.profileName)
+
+			// Verify error expectation
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// If we have behavior section, verify condition extraction
+			if tt.clockChain.Behavior != nil {
+				defaultConditions := hcm.extractConditionsByType(tt.clockChain.Behavior.Conditions, "default")
+				initConditions := hcm.extractConditionsByType(tt.clockChain.Behavior.Conditions, "init")
+
+				assert.Equal(t, tt.expectedDefaultCount, len(defaultConditions), "Default conditions count mismatch")
+				assert.Equal(t, tt.expectedInitCount, len(initConditions), "Init conditions count mismatch")
+
+				t.Logf("✅ Found %d default conditions and %d init conditions",
+					len(defaultConditions), len(initConditions))
+			}
+		})
+	}
+}
+
+// TestExtractConditionsByType tests the extractConditionsByType function
+func TestExtractConditionsByType(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer TeardownMockDpllPinsForTests()
+
+	hcm := NewHardwareConfigManager()
+
+	// Create test conditions
+	conditions := []types.Condition{
+		{
+			Name: "Default Condition",
+			Sources: []types.SourceState{
+				{SourceName: "TestSource", ConditionType: "default"},
+			},
+		},
+		{
+			Name:    "Init Condition (Empty Sources)",
+			Sources: []types.SourceState{}, // Empty sources should be treated as init
+		},
+		{
+			Name: "Locked Condition",
+			Sources: []types.SourceState{
+				{SourceName: "TestSource", ConditionType: "locked"},
+			},
+		},
+		{
+			Name: "Lost Condition",
+			Sources: []types.SourceState{
+				{SourceName: "TestSource", ConditionType: "lost"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		conditionType string
+		expectedCount int
+		expectedNames []string
+	}{
+		{
+			name:          "extract default conditions",
+			conditionType: "default",
+			expectedCount: 1,
+			expectedNames: []string{"Default Condition"},
+		},
+		{
+			name:          "extract init conditions",
+			conditionType: "init",
+			expectedCount: 1,
+			expectedNames: []string{"Init Condition (Empty Sources)"},
+		},
+		{
+			name:          "extract locked conditions",
+			conditionType: "locked",
+			expectedCount: 1,
+			expectedNames: []string{"Locked Condition"},
+		},
+		{
+			name:          "extract lost conditions",
+			conditionType: "lost",
+			expectedCount: 1,
+			expectedNames: []string{"Lost Condition"},
+		},
+		{
+			name:          "extract non-existent condition type",
+			conditionType: "nonexistent",
+			expectedCount: 0,
+			expectedNames: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hcm.extractConditionsByType(conditions, tt.conditionType)
+
+			assert.Equal(t, tt.expectedCount, len(result), "Condition count mismatch")
+
+			// Verify condition names
+			resultNames := make([]string, len(result))
+			for i, condition := range result {
+				resultNames[i] = condition.Name
+			}
+
+			for _, expectedName := range tt.expectedNames {
+				assert.Contains(t, resultNames, expectedName, "Expected condition not found")
+			}
+
+			t.Logf("✅ Found %d conditions of type '%s': %v",
+				len(result), tt.conditionType, resultNames)
+		})
+	}
 }
 
 // TestResolveSysFSPtpDevice tests the resolveSysFSPtpDevice function with mock file system
@@ -594,7 +817,7 @@ func TestResolveSysFSPtpDevice(t *testing.T) {
 
 	// Create HardwareConfigManager for testing
 	hcm := &HardwareConfigManager{
-		hardwareConfigs: make([]types.HardwareConfig, 0),
+		hardwareConfigs: make([]enrichedHardwareConfig, 0),
 	}
 
 	testCases := []struct {
