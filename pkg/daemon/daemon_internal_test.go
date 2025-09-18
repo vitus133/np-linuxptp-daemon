@@ -115,6 +115,14 @@ func Test_applyProfile_synce(t *testing.T) {
 func Test_applyProfile_TBC(t *testing.T) {
 	defer clean(t)
 
+	// Set up mock DPLL pins for testing
+	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer hardwareconfig.TeardownMockDpllPinsForTests()
+
 	testDataFiles := []string{
 		"testdata/profile-tbc-tt.yaml",
 		"testdata/profile-tbc-tr.yaml",
@@ -826,6 +834,14 @@ func TestProcessTBCTransitionHardwareConfig(t *testing.T) {
 
 // TestProcessTBCTransitionHardwareConfig_WithRealData tests the function with real hardware config and log data
 func TestProcessTBCTransitionHardwareConfig_WithRealData(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer hardwareconfig.TeardownMockDpllPinsForTests()
+
 	// Load the hardware config from testdata
 	hwConfigData, err := os.ReadFile("../hardwareconfig/testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err, "Should be able to read hardware config test data")
@@ -952,6 +968,14 @@ func TestProcessTBCTransitionHardwareConfig_WithRealData(t *testing.T) {
 
 // TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration tests integration with real hardware config
 func TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer hardwareconfig.TeardownMockDpllPinsForTests()
+
 	// Load and parse the hardware config
 	hwConfigData, err := os.ReadFile("../hardwareconfig/testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err, "Should be able to read hardware config test data")
@@ -1018,6 +1042,14 @@ func TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration(t *testing
 
 // TestProcessTBCTransitionHardwareConfig_ProcessLogFile reads log data line by line and processes it
 func TestProcessTBCTransitionHardwareConfig_ProcessLogFile(t *testing.T) {
+	// Set up mock DPLL pins for testing
+	mockErr := hardwareconfig.SetupMockDpllPinsForTests()
+	if mockErr != nil {
+		t.Logf("Warning: Failed to setup mock DPLL pins: %v", mockErr)
+		// Continue with test as DPLL pins are optional
+	}
+	defer hardwareconfig.TeardownMockDpllPinsForTests()
+
 	// Load the hardware config from testdata
 	hwConfigData, err := os.ReadFile("../hardwareconfig/testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err, "Should be able to read hardware config test data")

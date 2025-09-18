@@ -22,7 +22,7 @@ type HardwareConfigUpdateHandler interface {
 //nolint:revive // Name is part of established API
 type HardwareConfigManager struct {
 	hardwareConfigs []types.HardwareConfig
-	pinCache        map[string]map[string]string
+	pinCache        *PinCache
 }
 
 // NewHardwareConfigManager creates a new hardware config manager
@@ -36,10 +36,15 @@ func NewHardwareConfigManager() *HardwareConfigManager {
 // This method updates the hardware configuration stored in the manager
 func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
 	glog.Infof("Received hardware configuration update with %d hardware configs", len(hwConfigs))
+	var err error
 
 	// Store the hardware configs for use during daemon restart
 	hcm.hardwareConfigs = make([]types.HardwareConfig, len(hwConfigs))
 	copy(hcm.hardwareConfigs, hwConfigs)
+	hcm.pinCache, err = GetDpllPins()
+	if err != nil {
+		return fmt.Errorf("failed to get DPLL pins: %w", err)
+	}
 
 	// Log the hardware configurations for debugging
 	for i, hwConfig := range hwConfigs {
