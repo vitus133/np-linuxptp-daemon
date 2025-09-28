@@ -16,8 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/hardwareconfig"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/config"
@@ -198,6 +200,13 @@ type ptpProcess struct {
 	hasCollectedMetrics   bool
 	tBCAttributes         tBCProcessAttributes
 	GrandmasterClockClass uint8
+	daemon                *Daemon // Reference to daemon for hardwareconfig access
+
+	// Cached resources for T-BC processing (called 16x/second)
+	tbcHasHardwareConfig bool                             // Cached hardwareconfig availability
+	tbcStateDetector     *hardwareconfig.PTPStateDetector // Cached PTP state detector instance
+	portLockedRegex      *regexp.Regexp                   // Pre-compiled regex for T-BC locked transitions
+	portLostRegex        *regexp.Regexp                   // Pre-compiled regex for T-BC lost transitions
 }
 
 func (p *ptpProcess) Stopped() bool {
@@ -232,6 +241,9 @@ type Daemon struct {
 
 	hwconfigs *[]ptpv1.HwConfig
 
+	// Hardware config manager handles hardware configurations from HardwareConfig CRs
+	hardwareConfigManager *hardwareconfig.HardwareConfigManager
+
 	refreshNodePtpDevice *bool
 
 	// channel ensure LinuxPTP.Run() exit when main function exits.
@@ -242,6 +254,18 @@ type Daemon struct {
 
 	// Allow vendors to include plugins
 	pluginManager PluginManager
+}
+
+// UpdateHardwareConfig implements controller.HardwareConfigUpdateHandler.
+// It is invoked by the controller reconciler via HardwareConfigHandler
+// (wired in cmd/main.go) to push the effective hardware configuration
+// into the running daemon. The daemon forwards the update to its
+// HardwareConfigManager which resolves and caches DPLL/sysfs commands.
+func (dn *Daemon) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
+	if dn.hardwareConfigManager == nil {
+		return fmt.Errorf("hardware config manager not initialized")
+	}
+	return dn.hardwareConfigManager.UpdateHardwareConfig(hwConfigs)
 }
 
 // New LinuxPTP is called by daemon to generate new linuxptp instance
@@ -271,19 +295,21 @@ func New(
 		ptpEventHandler: event.Init(nodeName, stdoutToSocket, eventSocket, eventChannel, closeManager, Offset, ClockState, ClockClassMetrics),
 	}
 	tracker.processManager = pm
+
 	return &Daemon{
-		nodeName:             nodeName,
-		namespace:            namespace,
-		stdoutToSocket:       stdoutToSocket,
-		kubeClient:           kubeClient,
-		ptpUpdate:            ptpUpdate,
-		pluginManager:        pluginManager,
-		hwconfigs:            hwconfigs,
-		refreshNodePtpDevice: refreshNodePtpDevice,
-		pmcPollInterval:      pmcPollInterval,
-		processManager:       pm,
-		readyTracker:         tracker,
-		stopCh:               stopCh,
+		nodeName:              nodeName,
+		namespace:             namespace,
+		stdoutToSocket:        stdoutToSocket,
+		kubeClient:            kubeClient,
+		ptpUpdate:             ptpUpdate,
+		pluginManager:         pluginManager,
+		hwconfigs:             hwconfigs,
+		hardwareConfigManager: hardwareconfig.NewHardwareConfigManager(),
+		refreshNodePtpDevice:  refreshNodePtpDevice,
+		pmcPollInterval:       pmcPollInterval,
+		processManager:        pm,
+		readyTracker:          tracker,
+		stopCh:                stopCh,
 	}
 }
 
@@ -393,6 +419,8 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	})
 
 	relations := reconcileRelatedProfiles(dn.ptpUpdate.NodeProfiles)
+	// TODO: resolve clock IDs, clockType, leadingInterface and upstreamPort from hardware config
+	// (needed to keep code compatibility elsewhere and allow it to work both with hardware config and plugins)
 	for _, profile := range dn.ptpUpdate.NodeProfiles {
 
 		if controlledID, ok := relations[*profile.Name]; ok {
@@ -497,7 +525,22 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	if test {
 		configPrefix = testDir
 	}
-	dn.pluginManager.OnPTPConfigChange(nodeProfile)
+
+	const hwConfigWait = 10 * time.Second
+	if !dn.hardwareConfigManager.WaitForHardwareConfigs(hwConfigWait) {
+		glog.Infof("Timed out waiting for hardware configs; falling back to plugins")
+	}
+
+	if dn.hardwareConfigManager.ReadyHardwareConfigForProfile(*nodeProfile.Name) {
+		glog.Infof("Using hardware configs for PTP profile %s instead of plugins", *nodeProfile.Name)
+		if err := dn.hardwareConfigManager.ApplyHardwareConfigsForProfile(nodeProfile); err != nil {
+			glog.Errorf("Failed to apply hardware configs for profile %s: %v", *nodeProfile.Name, err)
+			dn.pluginManager.OnPTPConfigChange(nodeProfile)
+		}
+	} else {
+		glog.Infof("No hardware configs found for PTP profile %s, using plugins", *nodeProfile.Name)
+		dn.pluginManager.OnPTPConfigChange(nodeProfile)
+	}
 
 	var err error
 	var cmdLine string
@@ -686,12 +729,16 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			logParser:            getParser(pProcess),
 			tBCAttributes:        tBCProcessAttributes{controlledPortsConfigFile: controlledConfigFile},
 			lastTransitionResult: event.PTP_NOTSET,
+			daemon:               dn, // Reference to daemon for hardwareconfig access
 		}
 
 		if pProcess == ptp4lProcessName {
 			if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
 				dprocess.tBCAttributes.trIfaceName = port
 			}
+
+			// Prepare cached resources for T-BC processing
+			dprocess.prepareTBCResources()
 		}
 		// TODO HARDWARE PLUGIN for e810
 		if pProcess == ts2phcProcessName { //& if the x plugin is enabled
@@ -916,16 +963,87 @@ func (p *ptpProcess) updateClockClass(c *net.Conn) {
 	}
 }
 
+// prepareTBCResources prepares cached resources for T-BC processing
+// This method caches expensive operations that would otherwise be repeated 16x/second
+func (p *ptpProcess) prepareTBCResources() {
+	// Cache hardwareconfig availability (expensive lookup)
+	if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
+		p.tbcHasHardwareConfig = p.daemon.hardwareConfigManager.HasHardwareConfigForProfile(&p.nodeProfile)
+	}
+
+	// Cache PTP state detector instance (expensive creation)
+	if p.tbcHasHardwareConfig {
+		p.tbcStateDetector = p.daemon.hardwareConfigManager.GetPTPStateDetector()
+	}
+
+	// Pre-compile separate regex patterns for T-BC locked and lost conditions (expensive compilation)
+	p.portLockedRegex = regexp.MustCompile(`(?i)to slave on master_clock_selected`)
+	p.portLostRegex = regexp.MustCompile(`(?i)(to master on announce_receipt_timeout_expires|slave to)`)
+}
+
+// tBCTransitionCheck performs ultra-fast T-BC transition detection (called 16x/second)
+// Uses cached values and optimized processing to minimize performance impact
 func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
+	// Use cached hardwareconfig availability (no expensive lookups)
+	if p.tbcHasHardwareConfig && p.tbcStateDetector != nil {
+		// Hardwareconfig path: Use cached PTP state detector
+		p.processTBCTransitionHardwareConfig(output, pm)
+	} else {
+		// Legacy path: Use optimized string matching
+		p.processTBCTransitionLegacy(output, pm)
+	}
+}
+
+// processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig (optimized)
+func (p *ptpProcess) processTBCTransitionHardwareConfig(output string, pm *PluginManager) {
+	// Use the new DetectStateChange function for optimal performance
+	conditionType := p.tbcStateDetector.DetectStateChange(output)
+
+	switch conditionType {
+	case "locked":
+		// Apply hardware config commands for "locked" condition instead of plugin
+		if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
+			if err := p.daemon.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, "locked"); err != nil {
+				glog.Errorf("Failed to apply hardware config for 'locked' condition: %v", err)
+				// Fallback to plugin if hardware config fails
+				pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+			} else {
+				glog.Infof("Successfully applied hardware config for 'locked' condition")
+			}
+		} else {
+			// Fallback to plugin if no hardware config manager
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
+		}
+		p.lastTransitionResult = event.PTP_LOCKED
+		p.sendPtp4lEvent()
+	case "lost":
+		// Apply hardware config commands for "lost" condition instead of plugin
+		if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
+			if err := p.daemon.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, "lost"); err != nil {
+				glog.Errorf("Failed to apply hardware config for 'lost' condition: %v", err)
+				// Fallback to plugin if hardware config fails
+				pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+			} else {
+				glog.Infof("Successfully applied hardware config for 'lost' condition")
+			}
+		} else {
+			// Fallback to plugin if no hardware config manager
+			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
+		}
+		p.lastTransitionResult = event.PTP_FREERUN
+		p.sendPtp4lEvent()
+	}
+}
+
+// processTBCTransitionLegacy is the original implementation as ultimate fallback
+func (p *ptpProcess) processTBCTransitionLegacy(output string, pm *PluginManager) {
 	if strings.Contains(output, p.tBCAttributes.trIfaceName) {
 		if strings.Contains(output, "to SLAVE on MASTER_CLOCK_SELECTED") {
-			glog.Info("T-BC MOVE TO NORMAL")
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
 			p.lastTransitionResult = event.PTP_LOCKED
 			p.sendPtp4lEvent()
 		} else if strings.Contains(output, "to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES") ||
 			strings.Contains(output, "SLAVE to") {
-			glog.Info("T-BC MOVE TO HOLDOVER")
 			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
 			p.lastTransitionResult = event.PTP_FREERUN
 			p.sendPtp4lEvent()

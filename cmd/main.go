@@ -18,6 +18,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
@@ -26,6 +27,9 @@ import (
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/daemon"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/features"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/leap"
+
+	// TODO: Remove this once hardwareConfig types are available in ptp-operator
+	hwtypes "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpclient "github.com/k8snetworkplumbingwg/ptp-operator/pkg/client/clientset/versioned"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,6 +53,15 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(ptpv1.AddToScheme(scheme))
+	// Register our temporary hardwareConfig types
+	utilruntime.Must(registerHardwareConfigTypes(scheme))
+}
+
+// registerHardwareConfigTypes registers our temporary hardwareConfig types with the scheme
+// TODO: Remove this once hardwareConfig types are available in ptp-operator
+func registerHardwareConfigTypes(s *runtime.Scheme) error {
+	// Use the AddToScheme function from the types package to properly register types
+	return hwtypes.AddToScheme(s)
 }
 
 // Parse Command line flags
@@ -59,7 +72,7 @@ func flagInit(cp *cliParams) {
 		"profile to start linuxptp processes")
 	flag.IntVar(&cp.pmcPollInterval, "pmc-poll-interval", config.DefaultPmcPollInterval,
 		"Interval for periodical PMC poll")
-	flag.BoolVar(&cp.useController, "use-controller", false,
+	flag.BoolVar(&cp.useController, "use-controller", true,
 		"Use Kubernetes controller to watch PtpConfig resources (default: false)")
 }
 
@@ -151,7 +164,7 @@ func main() {
 	features.SetFlags(version, ocpVersion)
 	features.Flags.Print()
 
-	go daemon.New(
+	daemonInstance := daemon.New(
 		nodeName,
 		daemon.PtpNamespace,
 		stdoutToSocket,
@@ -164,7 +177,8 @@ func main() {
 		closeProcessManager,
 		cp.pmcPollInterval,
 		tracker,
-	).Run()
+	)
+	go daemonInstance.Run()
 
 	tickerPull := time.NewTicker(time.Second * time.Duration(cp.updateInterval))
 	defer tickerPull.Stop()
@@ -185,6 +199,9 @@ func main() {
 	var mgrCancel context.CancelFunc
 	if cp.useController {
 		glog.Info("Setting up controller manager for PtpConfig resources")
+
+		// Setup controller-runtime logger to use klog/glog
+		ctrl.SetLogger(klog.NewKlogr())
 
 		// Create manager
 		var err1 error
@@ -219,6 +236,24 @@ func main() {
 
 		if err1 = ptpConfigReconciler.SetupWithManager(mgr); err1 != nil {
 			glog.Errorf("unable to create controller for PtpConfig: %v", err1)
+			return
+		}
+
+		// Setup HardwareConfig controller
+		hwConfigReconciler := &controller.HardwareConfigReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			NodeName: nodeName,
+			// HardwareConfigHandler is the daemon instance. This allows the
+			// HardwareConfig controller to call daemon.UpdateHardwareConfig(...)
+			// when reconciled configs change. The daemon then forwards the
+			// update to its HardwareConfigManager for resolution/caching.
+			HardwareConfigHandler: daemonInstance,
+			ConfigUpdate:          ptpConfUpdate, // Enable hardware config to trigger PTP restarts
+		}
+
+		if err1 = hwConfigReconciler.SetupWithManager(mgr); err1 != nil {
+			glog.Errorf("unable to create controller for HardwareConfig: %v", err1)
 			return
 		}
 

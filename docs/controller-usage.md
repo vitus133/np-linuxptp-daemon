@@ -6,31 +6,46 @@ This document describes how to use the LinuxPTP daemon with Kubernetes controlle
 
 The LinuxPTP daemon now supports two modes of operation (controller mode is disabled by default; enable with `--use-controller=true`):
 
-1. **Controller Mode**: Watches `PtpConfig` custom resources and automatically applies matching configurations
+1. **Controller Mode**: Watches `PtpConfig` and `HardwareConfig` custom resources and automatically applies matching configurations
 2. **Legacy File Mode**: Reads configuration from mounted ConfigMaps (backward compatibility)
 
 ## Controller Mode
 
 ### Features
 
-- **Automatic Configuration**: Watches `PtpConfig` CRDs across the cluster
+- **Automatic Configuration**: Watches `PtpConfig` and `HardwareConfig` CRDs across the cluster
 - **Node Matching**: Applies configurations based on node name and label selectors  
 - **Priority-based Selection**: When multiple recommendations match, highest priority wins
+- **Hardware Configuration**: Applies hardware-specific settings for PTP devices
 - **Real-time Updates**: Configuration changes are applied automatically without restarts
 
 ### How It Works
 
 1. The daemon starts with a Kubernetes controller manager
-2. Controller watches all `PtpConfig` resources in the cluster
-3. For each config change, controller evaluates recommendations against current node
+2. Controllers watch all `PtpConfig` and `HardwareConfig` resources in the cluster
+3. For each config change, controllers evaluate configurations against current node
 4. Matching profiles are converted to JSON and sent to the daemon's configuration system
-5. Daemon applies the new configuration and restarts PTP processes as needed
+5. Hardware configurations are applied to PTP-capable hardware devices  
+6. Daemon applies the new configuration and restarts PTP processes as needed
 
 ### Configuration Flow
 
 ```
 PtpConfig CRD → Controller → Node Matching → Profile Selection → Daemon Config Update → PTP Process Restart
+HardwareConfig CRD → Controller → Check Active Profile Association → Unified Restart Trigger → PTP Process Restart
 ```
+
+### Unified Restart Mechanism
+
+Both PtpConfig and HardwareConfig controllers use the same unified restart mechanism:
+
+1. **PtpConfig Changes**: Always trigger a complete PTP process restart immediately
+2. **HardwareConfig Changes**: Check if the hardware config is associated with a currently active PTP profile via the `RelatedPtpProfileName` field
+   - If associated: Schedule a **deferred restart** after all configurations are reconciled
+   - If not associated: Only update hardware configuration without restart
+3. **Unified Signal**: Both controllers use the same `UpdateCh` channel to signal the daemon
+4. **Deferred Execution**: HardwareConfig changes use a 100ms delay to ensure all reconciliations complete before triggering restart
+5. **Complete Restart**: The daemon performs a complete stop/restart cycle, ensuring both PTP and hardware configurations are applied consistently
 
 ### Node Matching Logic
 
@@ -68,6 +83,35 @@ spec:
     - nodeLabel: "node-role.kubernetes.io/worker"
 ```
 
+### Example HardwareConfig
+
+```yaml
+apiVersion: ptp.openshift.io/v2alpha1
+kind: HardwareConfig
+metadata:
+  name: test
+  namespace: openshift-ptp
+spec:
+  relatedPtpProfileName: 01-tbc-tr
+  profile:
+    name: "tbc"
+    clockChain:
+      structure:
+      - name: leader-ens4f1
+        ethernet:
+          - ports: ["ens4f0","ens4f1","ens4f2","ens4f3"]
+        dpll:
+          phaseInputs:
+            CVL_SDP22:
+              frequency: 1
+              description: PTP time receiver input
+          phaseOutputs:
+            REF-SMA1:
+              connector: SMA1 
+              frequency: 1 
+
+```
+
 ### Deployment
 
 The daemon deployment includes:
@@ -103,6 +147,12 @@ rules:
   verbs: ["get", "list", "watch"]
 - apiGroups: ["ptp.openshift.io"]
   resources: ["ptpconfigs/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["ptp.openshift.io"]
+  resources: ["hardwareconfigs"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["ptp.openshift.io"]
+  resources: ["hardwareconfigs/status"]
   verbs: ["get", "update", "patch"]
 ```
 
