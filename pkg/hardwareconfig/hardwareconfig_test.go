@@ -728,7 +728,7 @@ func TestExtractConditionsByType(t *testing.T) {
 		{
 			Name: "Default Condition",
 			Sources: []types.SourceState{
-				{SourceName: "TestSource", ConditionType: "default"},
+				{SourceName: "TestSource", ConditionType: ConditionTypeDefault},
 			},
 		},
 		{
@@ -738,13 +738,13 @@ func TestExtractConditionsByType(t *testing.T) {
 		{
 			Name: "Locked Condition",
 			Sources: []types.SourceState{
-				{SourceName: "TestSource", ConditionType: "locked"},
+				{SourceName: "TestSource", ConditionType: ConditionTypeLocked},
 			},
 		},
 		{
 			Name: "Lost Condition",
 			Sources: []types.SourceState{
-				{SourceName: "TestSource", ConditionType: "lost"},
+				{SourceName: "TestSource", ConditionType: ConditionTypeLost},
 			},
 		},
 	}
@@ -757,25 +757,25 @@ func TestExtractConditionsByType(t *testing.T) {
 	}{
 		{
 			name:          "extract default conditions",
-			conditionType: "default",
+			conditionType: ConditionTypeDefault,
 			expectedCount: 1,
 			expectedNames: []string{"Default Condition"},
 		},
 		{
 			name:          "extract init conditions",
-			conditionType: "init",
+			conditionType: ConditionTypeInit,
 			expectedCount: 1,
 			expectedNames: []string{"Init Condition (Empty Sources)"},
 		},
 		{
 			name:          "extract locked conditions",
-			conditionType: "locked",
+			conditionType: ConditionTypeLocked,
 			expectedCount: 1,
 			expectedNames: []string{"Locked Condition"},
 		},
 		{
 			name:          "extract lost conditions",
-			conditionType: "lost",
+			conditionType: ConditionTypeLost,
 			expectedCount: 1,
 			expectedNames: []string{"Lost Condition"},
 		},

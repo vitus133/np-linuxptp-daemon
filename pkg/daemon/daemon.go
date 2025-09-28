@@ -994,42 +994,34 @@ func (p *ptpProcess) tBCTransitionCheck(output string, pm *PluginManager) {
 	}
 }
 
+// applyConditionOrFallback applies hardware config for a condition or falls back to plugin
+func (p *ptpProcess) applyConditionOrFallback(conditionType, pluginAction string, pm *PluginManager) {
+	if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
+		if err := p.daemon.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, conditionType); err != nil {
+			glog.Errorf("Failed to apply hardware config for '%s' condition: %v", conditionType, err)
+			// Fallback to plugin if hardware config fails
+			pm.AfterRunPTPCommand(&p.nodeProfile, pluginAction)
+		} else {
+			glog.Infof("Successfully applied hardware config for '%s' condition", conditionType)
+		}
+	} else {
+		// Fallback to plugin if no hardware config manager
+		pm.AfterRunPTPCommand(&p.nodeProfile, pluginAction)
+	}
+}
+
 // processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig (optimized)
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string, pm *PluginManager) {
 	// Use the new DetectStateChange function for optimal performance
 	conditionType := p.tbcStateDetector.DetectStateChange(output)
 
 	switch conditionType {
-	case "locked":
-		// Apply hardware config commands for "locked" condition instead of plugin
-		if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
-			if err := p.daemon.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, "locked"); err != nil {
-				glog.Errorf("Failed to apply hardware config for 'locked' condition: %v", err)
-				// Fallback to plugin if hardware config fails
-				pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-			} else {
-				glog.Infof("Successfully applied hardware config for 'locked' condition")
-			}
-		} else {
-			// Fallback to plugin if no hardware config manager
-			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-exit")
-		}
+	case hardwareconfig.ConditionTypeLocked:
+		p.applyConditionOrFallback(hardwareconfig.ConditionTypeLocked, "tbc-ho-exit", pm)
 		p.lastTransitionResult = event.PTP_LOCKED
 		p.sendPtp4lEvent()
-	case "lost":
-		// Apply hardware config commands for "lost" condition instead of plugin
-		if p.daemon != nil && p.daemon.hardwareConfigManager != nil {
-			if err := p.daemon.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, "lost"); err != nil {
-				glog.Errorf("Failed to apply hardware config for 'lost' condition: %v", err)
-				// Fallback to plugin if hardware config fails
-				pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-			} else {
-				glog.Infof("Successfully applied hardware config for 'lost' condition")
-			}
-		} else {
-			// Fallback to plugin if no hardware config manager
-			pm.AfterRunPTPCommand(&p.nodeProfile, "tbc-ho-entry")
-		}
+	case hardwareconfig.ConditionTypeLost:
+		p.applyConditionOrFallback(hardwareconfig.ConditionTypeLost, "tbc-ho-entry", pm)
 		p.lastTransitionResult = event.PTP_FREERUN
 		p.sendPtp4lEvent()
 	}

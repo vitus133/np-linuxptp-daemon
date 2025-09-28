@@ -16,6 +16,14 @@ import (
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 )
 
+// Condition type constants
+const (
+	ConditionTypeDefault = "default"
+	ConditionTypeInit    = "init"
+	ConditionTypeLocked  = "locked"
+	ConditionTypeLost    = "lost"
+)
+
 func collectConnectorUsage(subsystem types.Subsystem) (map[string]struct{}, map[string]struct{}) {
 	inputs := make(map[string]struct{})
 	outputs := make(map[string]struct{})
@@ -575,18 +583,18 @@ func (hcm *HardwareConfigManager) extractConditionByType(clockChain *types.Clock
 	for _, condition := range clockChain.Behavior.Conditions {
 		if len(condition.Sources) == 0 {
 			// Treat conditions with empty sources as "init" conditions
-			conditions["init"] = condition
+			conditions[ConditionTypeInit] = condition
 			continue
 		}
 		switch condition.Sources[0].ConditionType {
-		case "default":
-			conditions["default"] = condition
-		case "init":
-			conditions["init"] = condition
-		case "locked":
-			conditions["locked"] = condition
-		case "lost":
-			conditions["lost"] = condition
+		case ConditionTypeDefault:
+			conditions[ConditionTypeDefault] = condition
+		case ConditionTypeInit:
+			conditions[ConditionTypeInit] = condition
+		case ConditionTypeLocked:
+			conditions[ConditionTypeLocked] = condition
+		case ConditionTypeLost:
+			conditions[ConditionTypeLost] = condition
 		}
 	}
 	return conditions
@@ -648,8 +656,8 @@ func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *type
 	}
 
 	// Extract conditions by type
-	defaultConditions := hcm.extractConditionsByType(clockChain.Behavior.Conditions, "default")
-	initConditions := hcm.extractConditionsByType(clockChain.Behavior.Conditions, "init")
+	defaultConditions := hcm.extractConditionsByType(clockChain.Behavior.Conditions, ConditionTypeDefault)
+	initConditions := hcm.extractConditionsByType(clockChain.Behavior.Conditions, ConditionTypeInit)
 
 	glog.Infof("Found %d default conditions and %d init conditions in profile %s",
 		len(defaultConditions), len(initConditions), profileName)
@@ -681,7 +689,7 @@ func (hcm *HardwareConfigManager) extractConditionsByType(conditions []types.Con
 
 	for _, condition := range conditions {
 		// Special case: conditions with empty sources are treated as "init" conditions
-		if len(condition.Sources) == 0 && conditionType == "init" {
+		if len(condition.Sources) == 0 && conditionType == ConditionTypeInit {
 			glog.Infof("Found condition with empty sources, treating as init condition: %s", condition.Name)
 			matchingConditions = append(matchingConditions, condition)
 			continue
@@ -714,7 +722,7 @@ func (hcm *HardwareConfigManager) applyConditionDesiredStates(condition types.Co
 	glog.Infof("  Condition '%s': cached DPLL commands=%d", condition.Name, len(pinCommands))
 	if len(pinCommands) > 0 {
 		if err := hcm.applyDpllPinCommands(profileName, condition.Name, pinCommands); err != nil {
-			return fmt.Errorf("failed to apply cached DPLL commands for condition %s: %w", condition.Name, err)
+			return fmt.Errorf("failed to apply cached DPLL commands for condition '%s': %w", condition.Name, err)
 		}
 	}
 
@@ -911,7 +919,7 @@ func (hcm *HardwareConfigManager) ApplyConditionForProfile(nodeProfile *ptpv1.Pt
 		glog.Infof("  Profile '%s' condition '%s': cached sysfs commands=%d", profileName, conditionType, len(sysFSCommands))
 		if len(sysFSCommands) > 0 {
 			if err := hcm.applyCachedSysFSCommands(conditionType, profileName, sysFSCommands); err != nil {
-				return fmt.Errorf("failed to apply cached sysFS commands for condition %s: %w", conditionType, err)
+				return fmt.Errorf("failed to apply cached sysFS commands for condition '%s': %w", conditionType, err)
 			}
 		}
 
@@ -920,7 +928,7 @@ func (hcm *HardwareConfigManager) ApplyConditionForProfile(nodeProfile *ptpv1.Pt
 		glog.Infof("  Profile '%s' condition '%s': cached DPLL commands=%d", profileName, conditionType, len(pinCommands))
 		if len(pinCommands) > 0 {
 			if err := hcm.applyDpllPinCommands(profileName, conditionType, pinCommands); err != nil {
-				return fmt.Errorf("failed to apply cached DPLL commands for condition %s: %w", conditionType, err)
+				return fmt.Errorf("failed to apply cached DPLL commands for condition '%s': %w", conditionType, err)
 			}
 		}
 	}
