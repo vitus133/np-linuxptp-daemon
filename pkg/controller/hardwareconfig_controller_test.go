@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -148,7 +149,7 @@ func TestCalculateNodeHardwareConfigs(t *testing.T) {
 			}
 
 			// Call the method under test
-			result, err := reconciler.calculateNodeHardwareConfigs(nil, tc.hwConfigs)
+			result, err := reconciler.calculateNodeHardwareConfigs(context.TODO(), tc.hwConfigs)
 
 			// Verify no error occurred
 			assert.NoError(t, err)
@@ -189,7 +190,7 @@ func TestHardwareConfigUpdateHandlerIntegration(t *testing.T) {
 	mockHandler := &MockHardwareConfigHandler{}
 
 	reconciler := &HardwareConfigReconciler{
-		NodeName:              "test-node",
+		NodeName:              "test-node", //nolint:govet // needed for test setup
 		HardwareConfigHandler: mockHandler,
 	}
 
@@ -357,7 +358,7 @@ func TestCheckIfActiveProfilesAffected(t *testing.T) {
 				ConfigUpdate: mockTrigger,
 			}
 
-			result := reconciler.checkIfActiveProfilesAffected(nil, tc.hwConfigs)
+			result := reconciler.checkIfActiveProfilesAffected(context.TODO(), tc.hwConfigs)
 
 			assert.Equal(t, tc.expectedRestart, result, tc.description)
 		})
@@ -391,11 +392,11 @@ func TestRestartTriggerIntegration(t *testing.T) {
 	}
 
 	// Test that the restart is needed
-	needsRestart := reconciler.checkIfActiveProfilesAffected(nil, hwConfigs)
+	needsRestart := reconciler.checkIfActiveProfilesAffected(context.TODO(), hwConfigs)
 	assert.True(t, needsRestart, "Should detect that restart is needed")
 
 	// Test the deferred restart mechanism
-	reconciler.scheduleDeferredRestart(nil)
+	reconciler.scheduleDeferredRestart(context.TODO())
 
 	// Wait for the deferred restart to execute (implementation uses 200ms delay)
 	time.Sleep(250 * time.Millisecond)
@@ -418,14 +419,14 @@ func TestDeferredRestartDebouncing(t *testing.T) {
 	}
 
 	// Schedule the first deferred restart
-	reconciler.scheduleDeferredRestart(nil)
+	reconciler.scheduleDeferredRestart(context.TODO())
 
 	// Wait a bit to ensure the first restart is scheduled
 	time.Sleep(10 * time.Millisecond)
 
 	// Schedule additional deferred restarts - these should be debounced
-	reconciler.scheduleDeferredRestart(nil)
-	reconciler.scheduleDeferredRestart(nil)
+	reconciler.scheduleDeferredRestart(context.TODO())
+	reconciler.scheduleDeferredRestart(context.TODO())
 
 	// Wait longer than the goroutine delay to ensure completion
 	time.Sleep(250 * time.Millisecond)

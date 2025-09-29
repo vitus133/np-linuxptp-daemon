@@ -472,9 +472,9 @@ func (cc *ClockChain) ResolveClockAliases() error {
 	// Parse clock identifiers to uint64 values
 	for i := range cc.CommonDefinitions.ClockIdentifiers {
 		if cc.CommonDefinitions.ClockIdentifiers[i].ClockID != "" {
-			parsed, err := ParseClockID(cc.CommonDefinitions.ClockIdentifiers[i].ClockID)
-			if err != nil {
-				return fmt.Errorf("commonDefinitions.clockIdentifiers[%d].clockId: %w", i, err)
+			parsed, parseErr := ParseClockID(cc.CommonDefinitions.ClockIdentifiers[i].ClockID)
+			if parseErr != nil {
+				return fmt.Errorf("commonDefinitions.clockIdentifiers[%d].clockId: %w", i, parseErr)
 			}
 			cc.CommonDefinitions.ClockIdentifiers[i].ClockIDParsed = parsed
 		}
@@ -483,16 +483,16 @@ func (cc *ClockChain) ResolveClockAliases() error {
 	// Resolve DPLL clock IDs
 	for si := range cc.Structure {
 		if cc.Structure[si].DPLL.ClockID != "" {
-			resolved, err := resolveClockIDValue(cc.Structure[si].DPLL.ClockID, aliasToClock)
-			if err != nil {
-				return fmt.Errorf("structure[%d] DPLL.clockId: %w", si, err)
+			resolved, resolveErr := resolveClockIDValue(cc.Structure[si].DPLL.ClockID, aliasToClock)
+			if resolveErr != nil {
+				return fmt.Errorf("structure[%d] DPLL.clockId: %w", si, resolveErr)
 			}
 			cc.Structure[si].DPLL.ClockID = resolved
 
 			// Parse the resolved clock ID to uint64
-			parsed, err := ParseClockID(resolved)
-			if err != nil {
-				return fmt.Errorf("structure[%d] DPLL.clockId parse: %w", si, err)
+			parsed, structParseErr := ParseClockID(resolved)
+			if structParseErr != nil {
+				return fmt.Errorf("structure[%d] DPLL.clockId parse: %w", si, structParseErr)
 			}
 			cc.Structure[si].DPLL.ClockIDParsed = parsed
 		}
@@ -504,16 +504,16 @@ func (cc *ClockChain) ResolveClockAliases() error {
 
 	// Resolve source clock IDs
 	for i := range cc.Behavior.Sources {
-		resolved, err := resolveClockIDValue(cc.Behavior.Sources[i].ClockID, aliasToClock)
-		if err != nil {
-			return fmt.Errorf("behavior.sources[%d].clockId: %w", i, err)
+		resolved, sourceErr := resolveClockIDValue(cc.Behavior.Sources[i].ClockID, aliasToClock)
+		if sourceErr != nil {
+			return fmt.Errorf("behavior.sources[%d].clockId: %w", i, sourceErr)
 		}
 		cc.Behavior.Sources[i].ClockID = resolved
 
 		// Parse the resolved clock ID to uint64
-		parsed, err := ParseClockID(resolved)
-		if err != nil {
-			return fmt.Errorf("behavior.sources[%d].clockId parse: %w", i, err)
+		parsed, behaviorParseErr := ParseClockID(resolved)
+		if behaviorParseErr != nil {
+			return fmt.Errorf("behavior.sources[%d].clockId parse: %w", i, behaviorParseErr)
 		}
 		cc.Behavior.Sources[i].ClockIDParsed = parsed
 	}
@@ -525,16 +525,16 @@ func (cc *ClockChain) ResolveClockAliases() error {
 
 			// Resolve DPLL clock ID if present
 			if desiredState.DPLL != nil && desiredState.DPLL.ClockID != "" {
-				resolved, err := resolveClockIDValue(desiredState.DPLL.ClockID, aliasToClock)
-				if err != nil {
-					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId: %w", ci, di, err)
+				resolved, desiredErr := resolveClockIDValue(desiredState.DPLL.ClockID, aliasToClock)
+				if desiredErr != nil {
+					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId: %w", ci, di, desiredErr)
 				}
 				desiredState.DPLL.ClockID = resolved
 
 				// Parse the resolved clock ID to uint64
-				parsed, err := ParseClockID(resolved)
-				if err != nil {
-					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId parse: %w", ci, di, err)
+				parsed, desiredParseErr := ParseClockID(resolved)
+				if desiredParseErr != nil {
+					return fmt.Errorf("behavior.conditions[%d].desiredStates[%d].dpll.clockId parse: %w", ci, di, desiredParseErr)
 				}
 				desiredState.DPLL.ClockIDParsed = parsed
 			}
@@ -544,7 +544,7 @@ func (cc *ClockChain) ResolveClockAliases() error {
 	return nil
 }
 
-// ValidatePinConfig ensures frequency and esyncConfigName are mutually exclusive
+// Validate ensures frequency and esyncConfigName are mutually exclusive
 func (pc *PinConfig) Validate() error {
 	if pc.Frequency != nil && pc.ESyncConfigName != "" {
 		return fmt.Errorf("frequency and esyncConfigName are mutually exclusive")
@@ -559,7 +559,7 @@ func (pc *PinConfig) Validate() error {
 	return nil
 }
 
-// ValidateSourceConfig ensures PTPTimeReceivers is specified when sourceType is ptpTimeReceiver
+// Validate ensures PTPTimeReceivers is specified when sourceType is ptpTimeReceiver
 func (sc *SourceConfig) Validate() error {
 	if err := ValidateClockID(sc.ClockID); err != nil {
 		return fmt.Errorf("invalid clock ID: %w", err)
@@ -578,7 +578,7 @@ func (sc *SourceConfig) Validate() error {
 	return nil
 }
 
-// ValidateClockChain performs comprehensive validation of the entire configuration
+// Validate performs comprehensive validation of the entire configuration
 func (cc *ClockChain) Validate() error {
 	// Validate that structure has at least one subsystem
 	if len(cc.Structure) == 0 {
@@ -954,21 +954,21 @@ func (in *HardwareProfile) DeepCopy() *HardwareProfile {
 }
 
 // DeepCopyInto for ClockChain - simplified version focusing on main fields
-func (in *ClockChain) DeepCopyInto(out *ClockChain) {
-	*out = *in
-	if in.CommonDefinitions != nil {
+func (cc *ClockChain) DeepCopyInto(out *ClockChain) {
+	*out = *cc
+	if cc.CommonDefinitions != nil {
 		out.CommonDefinitions = new(CommonDefinitions)
 		// Simplified deep copy for CommonDefinitions
-		*out.CommonDefinitions = *in.CommonDefinitions
+		*out.CommonDefinitions = *cc.CommonDefinitions
 	}
-	if in.Structure != nil {
-		in, out := &in.Structure, &out.Structure
-		*out = make([]Subsystem, len(*in))
-		copy(*out, *in)
+	if cc.Structure != nil {
+		structIn, structOut := &cc.Structure, &out.Structure
+		*structOut = make([]Subsystem, len(*structIn))
+		copy(*structOut, *structIn)
 	}
-	if in.Behavior != nil {
+	if cc.Behavior != nil {
 		out.Behavior = new(Behavior)
 		// Simplified deep copy for Behavior
-		*out.Behavior = *in.Behavior
+		*out.Behavior = *cc.Behavior
 	}
 }

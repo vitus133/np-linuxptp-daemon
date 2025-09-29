@@ -234,8 +234,8 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 	// Resolve clock ID aliases in each hardware config before storing them
 	for i := range hwConfigs {
 		if hwConfigs[i].Spec.Profile.ClockChain != nil {
-			if err := hwConfigs[i].Spec.Profile.ClockChain.ResolveClockAliases(); err != nil {
-				return fmt.Errorf("failed to resolve clock aliases in hardware config %d: %w", i, err)
+			if aliasErr := hwConfigs[i].Spec.Profile.ClockChain.ResolveClockAliases(); aliasErr != nil {
+				return fmt.Errorf("failed to resolve clock aliases in hardware config %d: %w", i, aliasErr)
 			}
 		}
 	}
@@ -255,17 +255,17 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 
 		glog.Infof("Resolving hardware config '%s' (%d/%d)", hwConfig.Name, i+1, len(hwConfigs))
 
-		dpllCommands, sysFSCommands, err := hcm.resolveClockChainBehavior(hwConfig)
-		if err != nil {
-			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, err)
+		dpllCommands, sysFSCommands, behaviorErr := hcm.resolveClockChainBehavior(hwConfig)
+		if behaviorErr != nil {
+			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, behaviorErr)
 		}
 		glog.Infof("  behavior: %d conditions with DPLL commands, %d conditions with sysfs commands", len(dpllCommands), len(sysFSCommands))
 		prepared[i].dpllPinCommands = dpllCommands
 		prepared[i].sysFSCommands = sysFSCommands
 
-		structPins, structSysfs, err := hcm.resolveClockChainStructure(hwConfig)
-		if err != nil {
-			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", hwConfig.Name, err)
+		structPins, structSysfs, structErr := hcm.resolveClockChainStructure(hwConfig)
+		if structErr != nil {
+			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", hwConfig.Name, structErr)
 		}
 		glog.Infof("  structure: %d DPLL commands, %d sysfs commands", len(structPins), len(structSysfs))
 		prepared[i].structurePinCommands = structPins
@@ -276,12 +276,7 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 	return nil
 }
 
-func (hcm *HardwareConfigManager) cloneHardwareConfigs(src []enrichedHardwareConfig) []enrichedHardwareConfig {
-	dst := make([]enrichedHardwareConfig, len(src))
-	copy(dst, src)
-	return dst
-}
-
+// CloneHardwareConfigs returns a deep copy of the current hardware configurations
 func (hcm *HardwareConfigManager) CloneHardwareConfigs() []types.HardwareConfig {
 	hcm.mu.RLock()
 	defer hcm.mu.RUnlock()
@@ -433,7 +428,7 @@ func (hcm *HardwareConfigManager) resolveClockChainStructure(hwConfig types.Hard
 
 // resolveSubsystemStructure dispatches to a hardware-specific definition implementation.
 // Skeleton only: wire vendor-specific translators here.
-func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, subsystem types.Subsystem, cc *types.ClockChain) ([]dpll.PinParentDeviceCtl, []SysFSCommand, error) {
+func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, subsystem types.Subsystem, _ *types.ClockChain) ([]dpll.PinParentDeviceCtl, []SysFSCommand, error) {
 	// Load YAML defaults from pkg/hardwareconfig/hardware-specific/<hwDefPath>/defaults.yaml
 	spec, err := LoadHardwareDefaults(hwDefPath)
 	if err != nil {
@@ -707,7 +702,7 @@ func (hcm *HardwareConfigManager) extractConditionsByType(conditions []types.Con
 	return matchingConditions
 }
 
-func (hcm *HardwareConfigManager) applyConditionDesiredStates(condition types.Condition, profileName string, clockChain *types.ClockChain, enrichedConfig *enrichedHardwareConfig) error {
+func (hcm *HardwareConfigManager) applyConditionDesiredStates(condition types.Condition, profileName string, _ *types.ClockChain, enrichedConfig *enrichedHardwareConfig) error {
 	glog.Infof("Applying %d desired states for condition '%s' in profile %s", len(condition.DesiredStates), condition.Name, profileName)
 
 	sysFSCommands := enrichedConfig.sysFSCommands[condition.Name]
@@ -965,6 +960,7 @@ func (hcm *HardwareConfigManager) setHardwareConfigs(hwConfigs []enrichedHardwar
 	}
 }
 
+// WaitForHardwareConfigs waits for hardware configurations to be ready within the specified timeout
 func (hcm *HardwareConfigManager) WaitForHardwareConfigs(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	hcm.mu.Lock()
@@ -982,18 +978,21 @@ func (hcm *HardwareConfigManager) WaitForHardwareConfigs(timeout time.Duration) 
 	return true
 }
 
+// HasReadyHardwareConfigs returns true if hardware configurations are ready
 func (hcm *HardwareConfigManager) HasReadyHardwareConfigs() bool {
 	hcm.mu.RLock()
 	defer hcm.mu.RUnlock()
 	return hcm.ready
 }
 
+// HasHardwareConfigs returns true if any hardware configurations are loaded
 func (hcm *HardwareConfigManager) HasHardwareConfigs() bool {
 	hcm.mu.RLock()
 	defer hcm.mu.RUnlock()
 	return len(hcm.hardwareConfigs) > 0
 }
 
+// ReadyHardwareConfigForProfile returns true if hardware configurations are ready for the specified profile
 func (hcm *HardwareConfigManager) ReadyHardwareConfigForProfile(name string) bool {
 	hcm.mu.RLock()
 	defer hcm.mu.RUnlock()

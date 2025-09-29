@@ -181,7 +181,7 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 // scheduleDeferredRestart schedules a restart to happen after a short delay
 // This allows all HardwareConfig reconciliations to complete before triggering the restart
 // It also prevents multiple restarts within a short time window
-func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) {
+func (r *HardwareConfigReconciler) scheduleDeferredRestart(_ context.Context) {
 	// Check if a restart was recently scheduled (within last 2 seconds)
 	now := time.Now()
 	timeSinceLastRestart := now.Sub(r.lastRestartTime)
@@ -211,7 +211,9 @@ func (r *HardwareConfigReconciler) scheduleDeferredRestart(ctx context.Context) 
 }
 
 // calculateNodeHardwareConfigs determines which hardware configurations should be applied to this node
-func (r *HardwareConfigReconciler) calculateNodeHardwareConfigs(ctx context.Context, hwConfigs []types.HardwareConfig) ([]types.HardwareConfig, error) {
+//
+//nolint:unparam // error return is kept for future node matching logic
+func (r *HardwareConfigReconciler) calculateNodeHardwareConfigs(_ context.Context, hwConfigs []types.HardwareConfig) ([]types.HardwareConfig, error) {
 	var applicableConfigs []types.HardwareConfig
 
 	// For now, we apply all hardware configurations to all nodes
@@ -231,7 +233,7 @@ func (r *HardwareConfigReconciler) calculateNodeHardwareConfigs(ctx context.Cont
 
 // checkIfActiveProfilesAffected determines if hardware config changes should trigger PTP restart
 // We restart when hardware configs associated with active PTP profiles change
-func (r *HardwareConfigReconciler) checkIfActiveProfilesAffected(ctx context.Context, hwConfigs []types.HardwareConfig) bool {
+func (r *HardwareConfigReconciler) checkIfActiveProfilesAffected(_ context.Context, hwConfigs []types.HardwareConfig) bool {
 	// Get currently active PTP profiles from the daemon
 	if r.ConfigUpdate == nil {
 		glog.Infof("No ConfigUpdate interface available, cannot check active PTP profiles")

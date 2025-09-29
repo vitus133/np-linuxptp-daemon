@@ -220,8 +220,8 @@ func loadTestPinsFromFile(filename string) ([]*dpll.PinInfo, error) {
 	}
 
 	var hrPins []*PinInfoHR
-	if err := json.Unmarshal(data, &hrPins); err != nil {
-		return nil, fmt.Errorf("failed to parse test data: %v", err)
+	if unmarshalErr := json.Unmarshal(data, &hrPins); unmarshalErr != nil {
+		return nil, fmt.Errorf("failed to parse test data: %v", unmarshalErr)
 	}
 
 	var pins []*dpll.PinInfo
@@ -335,27 +335,27 @@ func TestGetDpllPins(t *testing.T) {
 			// Create mock dialer
 			var mockDialer MockDpllDialer
 			if tc.name == "dpll_connection_error" {
-				mockDialer = func(config interface{}) (DpllConnection, error) {
+				mockDialer = func(_ interface{}) (DpllConnection, error) {
 					return nil, fmt.Errorf("connection failed")
 				}
 			} else {
-				mockDialer = func(config interface{}) (DpllConnection, error) {
+				mockDialer = func(_ interface{}) (DpllConnection, error) {
 					return tc.mockConn, nil
 				}
 			}
 
 			// Call the testable version with mock dialer
-			result, err := GetDpllPinsMock(mockDialer)
+			result, testErr := GetDpllPinsMock(mockDialer)
 
 			if tc.expectError {
-				if err == nil {
+				if testErr == nil {
 					t.Errorf("Expected error but got none")
 				} else {
-					t.Logf("✅ Got expected error: %v", err)
+					t.Logf("✅ Got expected error: %v", testErr)
 				}
 			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
+				if testErr != nil {
+					t.Errorf("Unexpected error: %v", testErr)
 				} else {
 					if result.Count() != tc.expectedPins {
 						t.Errorf("Expected %d pins, got %d", tc.expectedPins, result.Count())
@@ -391,13 +391,13 @@ func TestGetDpllPins(t *testing.T) {
 			err:  nil,
 		}
 
-		mockDialer := func(config interface{}) (DpllConnection, error) {
+		mockDialer := func(_ interface{}) (DpllConnection, error) {
 			return mockConn, nil
 		}
 
-		cache, err := GetDpllPinsMock(mockDialer)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
+		cache, cacheErr := GetDpllPinsMock(mockDialer)
+		if cacheErr != nil {
+			t.Fatalf("Unexpected error: %v", cacheErr)
 		}
 
 		// Validate specific pin characteristics from the real test data

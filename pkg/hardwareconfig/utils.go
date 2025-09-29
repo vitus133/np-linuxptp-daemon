@@ -19,7 +19,7 @@ type DpllPinsGetter func() (*PinCache, error)
 var defaultDpllPinsGetter DpllPinsGetter = getRealDpllPins
 
 // dpllPinsGetter holds the current implementation (can be swapped for testing)
-var dpllPinsGetter DpllPinsGetter = defaultDpllPinsGetter
+var dpllPinsGetter = defaultDpllPinsGetter
 
 // SetDpllPinsGetter allows tests to inject a mock implementation
 func SetDpllPinsGetter(getter DpllPinsGetter) {
@@ -53,7 +53,7 @@ func (pc *PinCache) Count() int {
 // GetPin returns the pin info for a specific clock ID and board label
 func (pc *PinCache) GetPin(clockID uint64, boardLabel string) (*dpll.PinInfo, bool) {
 	if clockPins, exists := pc.Pins[clockID]; exists {
-		if pinInfo, exists := clockPins[boardLabel]; exists {
+		if pinInfo, found := clockPins[boardLabel]; found {
 			return &pinInfo, true
 		}
 	}
@@ -106,18 +106,21 @@ func buildPinCacheFromPins(pins []*dpll.PinInfo) *PinCache {
 	return cache
 }
 
+// PinParentControl represents a DPLL pin control structure
 type PinParentControl struct {
 	EecPriority    uint8
 	PpsPriority    uint8
 	EecOutputState uint8
 	PpsOutputState uint8
 }
+
+// PinControl represents DPLL pin control configuration
 type PinControl struct {
 	Label         string
 	ParentControl PinParentControl
 }
 
-// GetPinState returns DPLL pin state as a string
+// GetPinStateUint32 returns DPLL pin state as a string
 func GetPinStateUint32(s string) (uint32, error) {
 	stateMap := map[string]uint32{
 		"connected":    dpll.PinStateConnected,
@@ -131,6 +134,7 @@ func GetPinStateUint32(s string) (uint32, error) {
 	return 0, fmt.Errorf("invalid pin state: %s", s)
 }
 
+// BatchPinSet applies a batch of DPLL pin commands
 func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 	conn, err := dpll.Dial(nil)
 	if err != nil {
@@ -140,24 +144,24 @@ func BatchPinSet(commands *[]dpll.PinParentDeviceCtl) error {
 	defer conn.Close()
 	for _, command := range *commands {
 		glog.Infof("DPLL pin command %++v", command)
-		b, err := dpll.EncodePinControl(command)
-		if err != nil {
-			return err
+		b, encodeErr := dpll.EncodePinControl(command)
+		if encodeErr != nil {
+			return encodeErr
 		}
 		err = conn.SendCommand(dpll.DpllCmdPinSet, b)
 		if err != nil {
 			glog.Error("failed to send pin command: ", err)
 			return err
 		}
-		info, err := conn.DoPinGet(dpll.DoPinGetRequest{ID: command.ID})
-		if err != nil {
-			glog.Error("failed to get pin: ", err)
-			return err
+		info, getErr := conn.DoPinGet(dpll.DoPinGetRequest{ID: command.ID})
+		if getErr != nil {
+			glog.Error("failed to get pin: ", getErr)
+			return getErr
 		}
-		reply, err := dpll.GetPinInfoHR(info, time.Now())
-		if err != nil {
-			glog.Error("failed to convert pin reply to human readable: ", err)
-			return err
+		reply, replyErr := dpll.GetPinInfoHR(info, time.Now())
+		if replyErr != nil {
+			glog.Error("failed to convert pin reply to human readable: ", replyErr)
+			return replyErr
 		}
 		glog.Info("pin reply: ", string(reply))
 	}
@@ -285,6 +289,7 @@ func SetupMockDpllPinsForTestsWithError(err error) {
 	SetDpllPinsGetter(mockGetter)
 }
 
+// TeardownMockDpllPinsForTests cleans up DPLL pin mocks after testing
 func TeardownMockDpllPinsForTests() {
 	ResetDpllPinsGetter()
 }
@@ -341,7 +346,7 @@ func defaultResolveSysFSPtpDevice(interfacePath string) ([]string, error) {
 // Global variables for PTP device resolution mocking
 var (
 	defaultPtpDeviceResolver PtpDeviceResolver = defaultResolveSysFSPtpDevice
-	ptpDeviceResolver        PtpDeviceResolver = defaultPtpDeviceResolver
+	ptpDeviceResolver                          = defaultPtpDeviceResolver
 )
 
 // SetPtpDeviceResolver allows injection of a mock PTP device resolver for testing

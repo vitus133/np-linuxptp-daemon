@@ -26,11 +26,13 @@ type HardwareDefaults struct {
 	InternalDelays *InternalDelays `json:"internalDelays,omitempty"`
 }
 
+// PinDefault represents default pin configuration settings
 type PinDefault struct {
 	EEC *PinDefaultEntry `json:"eec,omitempty"`
 	PPS *PinDefaultEntry `json:"pps,omitempty"`
 }
 
+// PinDefaultEntry represents individual pin default settings for EEC or PPS
 type PinDefaultEntry struct {
 	Priority *int64 `json:"priority,omitempty"`
 	State    string `json:"state,omitempty"`
@@ -65,6 +67,7 @@ type InternalDelays struct {
 	GnssInput       InternalLink   `json:"gnssInput"`
 }
 
+// InternalLink represents internal delay configuration between connectors and pins
 type InternalLink struct {
 	Connector string `json:"connector"`
 	Pin       string `json:"pin"`
@@ -100,9 +103,8 @@ func LoadHardwareDefaults(hwDefPath string) (*HardwareDefaults, error) {
 			glog.Infof("Hardware defaults: using repo path %s", absRepoPath)
 			glog.Infof("Hardware defaults: raw YAML from %s:\n%s", absRepoPath, string(b))
 			return decodeHardwareDefaults(absRepoPath, b)
-		} else {
-			glog.Infof("Hardware defaults: repo path %s not found (%v)", absRepoPath, err)
 		}
+		glog.Infof("Hardware defaults: repo path %s not found", absRepoPath)
 	}
 
 	repoPath := filepath.Join("pkg", "hardwareconfig", "hardware-vendor", hwDefPath, "defaults.yaml")
@@ -123,9 +125,8 @@ func LoadHardwareDefaults(hwDefPath string) (*HardwareDefaults, error) {
 		glog.Infof("Hardware defaults: using repo-relative path %s", repoPath)
 		glog.Infof("Hardware defaults: raw YAML from %s:\n%s", repoPath, string(b))
 		return decodeHardwareDefaults(repoPath, b)
-	} else {
-		glog.Infof("Hardware defaults: repo-relative path %s not found (%v)", repoPath, err)
 	}
+	glog.Infof("Hardware defaults: repo-relative path %s not found", repoPath)
 
 	runtimeBaseEnv := os.Getenv("LINUXPTP_HW_VENDOR_BASE")
 	runtimeBases := []string{}
@@ -160,9 +161,8 @@ func LoadHardwareDefaults(hwDefPath string) (*HardwareDefaults, error) {
 			glog.Infof("Hardware defaults: using runtime path %s", runtimePath)
 			glog.Infof("Hardware defaults: raw YAML from %s:\n%s", runtimePath, string(b))
 			return decodeHardwareDefaults(runtimePath, b)
-		} else {
-			glog.Infof("Hardware defaults: runtime path %s not found (%v)", runtimePath, err)
 		}
+		glog.Infof("Hardware defaults: runtime path %s not found", runtimePath)
 	}
 
 	if strings.HasPrefix(hwDefPath, "configmap:") {
@@ -210,13 +210,6 @@ func decodeHardwareDefaults(path string, data []byte) (*HardwareDefaults, error)
 		return nil, fmt.Errorf("unmarshal %s: %w", path, err)
 	}
 	return &hd, nil
-}
-
-func getenvDefault(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
 }
 
 // --- ConfigMap resolver injection ---

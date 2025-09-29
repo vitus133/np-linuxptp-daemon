@@ -66,7 +66,7 @@ func TestApplyHardwareConfigsForProfile(t *testing.T) {
 			hcm := NewHardwareConfigManager()
 			defer hcm.resetExecutors()
 
-			hcm.overrideExecutors(nil, func(path, value string) error { return nil })
+			hcm.overrideExecutors(nil, func(_, _ string) error { return nil })
 
 			var appliedPins []dpll.PinParentDeviceCtl
 			hcm.overrideExecutors(func(cmds []dpll.PinParentDeviceCtl) error {
@@ -74,7 +74,7 @@ func TestApplyHardwareConfigsForProfile(t *testing.T) {
 				copy(snapshot, cmds)
 				appliedPins = append(appliedPins, snapshot...)
 				return nil
-			}, func(path, value string) error {
+			}, func(_, _ string) error {
 				return nil
 			})
 
@@ -687,13 +687,13 @@ func TestApplyDefaultAndInitConditions(t *testing.T) {
 			}
 
 			// Test the function
-			err := hcm.applyDefaultAndInitConditions(tt.clockChain, tt.profileName, mockEnrichedConfig)
+			testErr := hcm.applyDefaultAndInitConditions(tt.clockChain, tt.profileName, mockEnrichedConfig)
 
 			// Verify error expectation
 			if tt.expectError {
-				assert.Error(t, err)
+				assert.Error(t, testErr)
 			} else {
-				assert.NoError(t, err)
+				assert.NoError(t, testErr)
 			}
 
 			// If we have behavior section, verify condition extraction
@@ -976,7 +976,7 @@ func TestSysFSCommandCaching(t *testing.T) {
 	hcm := NewHardwareConfigManager()
 	defer hcm.resetExecutors()
 
-	hcm.overrideExecutors(nil, func(path, value string) error { return nil })
+	hcm.overrideExecutors(nil, func(_, _ string) error { return nil })
 
 	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
 	assert.NoError(t, err)
