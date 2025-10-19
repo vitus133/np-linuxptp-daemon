@@ -9,6 +9,14 @@ spec:
       behavior:
         conditions:
         - desiredStates:
+          - sysfs:
+              path: /sys/class/net/{interface}/device/ptp/ptp*/pins/SMA2
+              value: "2 2"
+              sourceName: PTP
+          - sysfs:
+              path: /sys/class/net/{interface}/device/ptp/ptp*/period
+              value: "2 0 0 1 0"
+              sourceName: PTP 
           - dpll:
               boardLabel: GNSS-1PPS
               clockId: Leader
@@ -95,6 +103,10 @@ spec:
       structure:
       - dpll:
           clockId: Leader
+          holdoverParameters:
+            maxInSpecOffset: 20
+            localMaxHoldoverOffset: 30
+            localHoldoverTimeout: 288
           phaseInputs:
             CVL_SDP22:
               description: PTP time receiver input

@@ -270,12 +270,28 @@ type Subsystem struct {
 	Ethernet []Ethernet `json:"ethernet"`
 }
 
+// HoldoverParameters defines the combination of the DPLL complex hardware parameters and the holdover specification threshold.
+type HoldoverParameters struct {
+	// MaxInSpecOffset is the holdover specification threshold in nanoseconds. Default - 100ns
+	MaxInSpecOffset uint64 `json:"maxInSpecOffset,omitempty"`
+
+	// LocalMaxHoldoverOffset is the maximum holdover offset in nanoseconds. Default - 1500ns
+	LocalMaxHoldoverOffset uint64 `json:"localMaxHoldoverOffset,omitempty"`
+
+	// LocalHoldoverTimeout is the time the clock will stay in the holdover state before reaching the
+	// LocalMaxHoldoverOffset (in seconds). Default - 14400s
+	LocalHoldoverTimeout uint64 `json:"localHoldoverTimeout,omitempty"`
+}
+
 // DPLL represents generic DPLL configuration within a synchronization subsystem.
 // Configuration of this section will result in DPLL device configurations through the Netlink driver.
 type DPLL struct {
 	// ClockID is an optional clock ID. If omitted, the hardware must support clock ID discovery.
 	// Format: decimal or hex ("5799633565432596414" or "0xaabbccfffeddeeff")
 	ClockID string `json:"clockId,omitempty"`
+
+	// HoldoverParameters defines the combination of the DPLL complex hardware parameters and the holdover specification threshold.
+	HoldoverParameters *HoldoverParameters `json:"holdoverParameters,omitempty"`
 
 	// ClockIDParsed is the parsed uint64 value of ClockID (populated during processing)
 	ClockIDParsed uint64 `json:"-"`

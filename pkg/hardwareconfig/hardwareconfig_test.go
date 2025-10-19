@@ -402,7 +402,7 @@ func TestNewPTPStateDetector(t *testing.T) {
 	assert.NotNil(t, psd.hcm)
 }
 
-// TestApplyConditionDesiredStatesWithRealData tests applyConditionDesiredStates using actual hardware config YAML data
+// TestApplyConditionDesiredStatesWithRealData tests applyConditionDesiredStatesByType using actual hardware config YAML data
 func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 	// Load the real hardware configuration from YAML
 	hwConfig, err := loadHardwareConfigFromFile("testdata/triple-t-bc-wpc.yaml")
@@ -495,19 +495,28 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 
 			// Create a mock enriched hardware config for testing
 			mockEnrichedConfig := &enrichedHardwareConfig{
-				HardwareConfig: *hwConfig,
-				sysFSCommands:  make(map[string][]SysFSCommand),
+				HardwareConfig:  *hwConfig,
+				sysFSCommands:   make(map[string][]SysFSCommand),
+				dpllPinCommands: make(map[string][]dpll.PinParentDeviceCtl),
+			}
+
+			// Determine the condition type for this condition
+			var conditionType string
+			if len(condition.Sources) == 0 {
+				conditionType = ConditionTypeInit
+			} else {
+				conditionType = condition.Sources[0].ConditionType
 			}
 
 			// Apply the condition's desired states
-			applyErr := hcm.applyConditionDesiredStates(condition, profileName, clockChain, mockEnrichedConfig)
+			applyErr := hcm.applyConditionDesiredStatesByType(condition, conditionType, profileName, mockEnrichedConfig)
 
 			// All conditions should apply successfully since the YAML is well-formed
 			if applyErr != nil {
-				t.Errorf("Failed to apply condition '%s': %v", condition.Name, applyErr)
+				t.Errorf("Failed to apply condition '%s' (type: %s): %v", condition.Name, conditionType, applyErr)
 			} else {
-				t.Logf("✅ Successfully applied condition '%s' with %d desired states",
-					condition.Name, len(condition.DesiredStates))
+				t.Logf("✅ Successfully applied condition '%s' (type: %s) with %d desired states",
+					condition.Name, conditionType, len(condition.DesiredStates))
 			}
 		})
 	}
