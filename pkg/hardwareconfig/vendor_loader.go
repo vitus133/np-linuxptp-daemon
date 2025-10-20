@@ -17,13 +17,16 @@ import (
 // HardwareDefaults is the YAML-backed spec defining static defaults/options for specific hardware.
 type HardwareDefaults struct {
 	// PinDefaults maps board labels to default priorities/states for EEC/PPS
-	PinDefaults map[string]*PinDefault `json:"pinDefaults,omitempty"`
+	PinDefaults map[string]*PinDefault `json:"pinDefaults,omitempty" yaml:"pinDefaults,omitempty"`
 
 	// ConnectorCommands defines commands to enable connectors as inputs, outputs or disable them
-	ConnectorCommands *ConnectorCommands `json:"connectorCommands,omitempty"`
+	ConnectorCommands *ConnectorCommands `json:"connectorCommands,omitempty" yaml:"connectorCommands,omitempty"`
+
+	// PinEsyncCommands defines command sequences for enabling eSync on pins
+	PinEsyncCommands *PinESyncCommands `json:"pinEsyncCommands,omitempty" yaml:"pinEsyncCommands,omitempty"`
 
 	// InternalDelays defines connector<->pin internal delays for this hardware model
-	InternalDelays *InternalDelays `json:"internalDelays,omitempty"`
+	InternalDelays *InternalDelays `json:"internalDelays,omitempty" yaml:"internalDelays,omitempty"`
 }
 
 // PinDefault represents default pin configuration settings
@@ -72,6 +75,26 @@ type InternalLink struct {
 	Connector string `json:"connector"`
 	Pin       string `json:"pin"`
 	DelayPs   int32  `json:"delayPs"`
+}
+
+// PinESyncCommands defines command sequences for configuring pins with eSync
+type PinESyncCommands struct {
+	Outputs []PinESyncCommand `json:"outputs,omitempty" yaml:"outputs,omitempty"`
+	Inputs  []PinESyncCommand `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+}
+
+// PinESyncCommand represents a single command in the eSync configuration sequence
+type PinESyncCommand struct {
+	Type             string                  `json:"type" yaml:"type"`
+	Description      string                  `json:"description,omitempty" yaml:"description,omitempty"`
+	Arguments        []string                `json:"arguments,omitempty" yaml:"arguments,omitempty"` // Arguments to set (minimum 1 if not using pinParentDevices)
+	PinParentDevices []PinParentDeviceConfig `json:"pinParentDevices,omitempty" yaml:"pinParentDevices,omitempty"`
+}
+
+// PinParentDeviceConfig represents parent device configuration in eSync commands
+type PinParentDeviceConfig struct {
+	ParentDevice string `json:"parentDevice" yaml:"parentDevice"`
+	State        string `json:"state" yaml:"state"`
 }
 
 // LoadHardwareDefaults loads defaults for a given hardware definition path (hwDefPath).

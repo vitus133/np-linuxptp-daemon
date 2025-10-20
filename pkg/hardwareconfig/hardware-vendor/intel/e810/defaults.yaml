@@ -100,3 +100,29 @@ internalDelays:
     pin: GNSS-1PPS
     delayPs: 6999
 
+pinEsyncCommands:
+  outputs:
+    - description: set frequency
+      type: DPLLWrite
+      arguments:
+        - frequency
+    - description: set eSync frequency
+      type: DPLLWrite
+      arguments:
+        - eSyncFrequency
+    - description: re-enable output
+      type: DPLLWrite
+      pinParentDevices:
+        - parentDevice: EEC
+          state: connected
+        - parentDevice: PPS
+          state: connected
+  inputs:
+    - description: set frequency
+      type: DPLLWrite
+      arguments:
+        - frequency
+    - description: set eSync frequency
+      type: DPLLWrite
+      arguments:
+        - eSyncFrequency

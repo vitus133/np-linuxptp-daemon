@@ -429,7 +429,7 @@ func (hcm *HardwareConfigManager) resolveClockChainStructure(hwConfig types.Hard
 
 // resolveSubsystemStructure dispatches to a hardware-specific definition implementation.
 // Skeleton only: wire vendor-specific translators here.
-func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, subsystem types.Subsystem, _ *types.ClockChain) ([]dpll.PinParentDeviceCtl, []SysFSCommand, error) {
+func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, subsystem types.Subsystem, clockChain *types.ClockChain) ([]dpll.PinParentDeviceCtl, []SysFSCommand, error) {
 	// Load YAML defaults from pkg/hardwareconfig/hardware-specific/<hwDefPath>/defaults.yaml
 	spec, err := LoadHardwareDefaults(hwDefPath)
 	if err != nil {
@@ -459,6 +459,13 @@ func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, su
 		}
 	}
 
+	// Process eSync/frequency configuration for all pins in the subsystem
+	esyncPins, err := hcm.buildESyncPinCommands(subsystem, clockChain, spec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to build eSync pin commands: %w", err)
+	}
+	pins = append(pins, esyncPins...)
+
 	// Translate connectorCommands to SysFS actions based on connectors referenced by pins
 	inputs, outputs := collectConnectorUsage(subsystem)
 	defaultInterface := firstInterface(subsystem)
@@ -469,6 +476,204 @@ func (hcm *HardwareConfigManager) resolveSubsystemStructure(hwDefPath string, su
 	sysfs = append(sysfs, extraSysfs...)
 
 	return pins, sysfs, nil
+}
+
+// buildESyncPinCommands processes all pins in the subsystem and builds frequency/eSync commands
+func (hcm *HardwareConfigManager) buildESyncPinCommands(subsystem types.Subsystem, clockChain *types.ClockChain, hwSpec *HardwareDefaults) ([]dpll.PinParentDeviceCtl, error) {
+	if hcm.pinCache == nil {
+		return nil, nil
+	}
+
+	commands := make([]dpll.PinParentDeviceCtl, 0)
+	clockID := subsystem.DPLL.ClockIDParsed
+
+	// Process all pin types (inputs and outputs)
+	pinGroups := []struct {
+		pins    map[string]types.PinConfig
+		isInput bool
+		name    string
+	}{
+		{subsystem.DPLL.PhaseInputs, true, "phase inputs"},
+		{subsystem.DPLL.PhaseOutputs, false, "phase outputs"},
+		{subsystem.DPLL.FrequencyInputs, true, "frequency inputs"},
+		{subsystem.DPLL.FrequencyOutputs, false, "frequency outputs"},
+	}
+
+	for _, group := range pinGroups {
+		for boardLabel, pinCfg := range group.pins {
+			cmds := hcm.buildPinFrequencyCommands(clockID, boardLabel, pinCfg, clockChain, hwSpec, group.isInput)
+			commands = append(commands, cmds...)
+		}
+	}
+
+	return commands, nil
+}
+
+// buildPinFrequencyCommands builds DPLL commands to set pin frequency (with optional eSync)
+// Returns a sequence of commands based on vendor-specific definitions
+func (hcm *HardwareConfigManager) buildPinFrequencyCommands(clockID uint64, boardLabel string, pinCfg types.PinConfig, clockChain *types.ClockChain, hwSpec *HardwareDefaults, isInput bool) []dpll.PinParentDeviceCtl {
+	pin, found := hcm.pinCache.GetPin(clockID, boardLabel)
+	if !found {
+		glog.V(2).Infof("Pin %s not found for clock %#x (eSync/frequency config)", boardLabel, clockID)
+		return nil
+	}
+
+	// Resolve frequency, eSync, and duty cycle configuration
+	frequency, esyncFreq, dutyCycle, hasConfig := hcm.resolvePinFrequency(pinCfg, clockChain)
+	if !hasConfig {
+		return nil
+	}
+
+	// If only frequency is set (no eSync), return a single command
+	if esyncFreq == 0 {
+		if frequency > 0 {
+			cmd := dpll.PinParentDeviceCtl{ID: pin.ID, Frequency: &frequency}
+			glog.Infof("Pin %s (id=%d, clock=%#x): frequency=%d Hz", boardLabel, pin.ID, clockID, frequency)
+			return []dpll.PinParentDeviceCtl{cmd}
+		}
+		return nil
+	}
+
+	// eSync is configured - use vendor-specific command sequence
+	glog.Infof("Pin %s (id=%d, clock=%#x): eSync frequency=%d Hz, duty cycle=%d%%, transfer frequency=%d Hz",
+		boardLabel, pin.ID, clockID, esyncFreq, dutyCycle, frequency)
+
+	// Get vendor-specific command sequence
+	if hwSpec == nil || hwSpec.PinEsyncCommands == nil {
+		// No vendor-specific sequence - fallback to single command
+		glog.Warningf("No vendor-specific eSync sequence defined, using fallback for pin %s", boardLabel)
+		cmd := dpll.PinParentDeviceCtl{
+			ID:             pin.ID,
+			Frequency:      &frequency,
+			EsyncFrequency: &esyncFreq,
+		}
+		return []dpll.PinParentDeviceCtl{cmd}
+	}
+
+	// Select appropriate command sequence (input vs output)
+	var cmdSequence []PinESyncCommand
+	if isInput {
+		cmdSequence = hwSpec.PinEsyncCommands.Inputs
+	} else {
+		cmdSequence = hwSpec.PinEsyncCommands.Outputs
+	}
+
+	if len(cmdSequence) == 0 {
+		glog.Warningf("Empty eSync command sequence for pin %s (input=%v), using fallback", boardLabel, isInput)
+		cmd := dpll.PinParentDeviceCtl{
+			ID:             pin.ID,
+			Frequency:      &frequency,
+			EsyncFrequency: &esyncFreq,
+		}
+		return []dpll.PinParentDeviceCtl{cmd}
+	}
+
+	// Build command sequence
+	commands := make([]dpll.PinParentDeviceCtl, 0, len(cmdSequence))
+	for _, cmdDef := range cmdSequence {
+		if cmdDef.Type != "DPLLWrite" {
+			glog.Warningf("Unsupported eSync command type '%s' for pin %s, skipping", cmdDef.Type, boardLabel)
+			continue
+		}
+
+		cmd := dpll.PinParentDeviceCtl{ID: pin.ID}
+
+		// Set argument-based fields
+		for _, arg := range cmdDef.Arguments {
+			switch arg {
+			case "frequency":
+				cmd.Frequency = &frequency
+			case "eSyncFrequency":
+				cmd.EsyncFrequency = &esyncFreq
+			default:
+				glog.Warningf("Unknown argument '%s' in eSync command for pin %s", arg, boardLabel)
+			}
+		}
+
+		// Set parent device states
+		if len(cmdDef.PinParentDevices) > 0 {
+			cmd.PinParentCtl = make([]dpll.PinControl, 0, len(cmdDef.PinParentDevices))
+			for _, parentCfg := range cmdDef.PinParentDevices {
+				// Find matching parent device in pin cache
+				for _, parent := range pin.ParentDevice {
+					// Match by device index: 0=EEC, 1=PPS
+					deviceName := ""
+					if parent.Direction == dpll.PinDirectionOutput {
+						if len(cmd.PinParentCtl) == 0 {
+							deviceName = "EEC"
+						} else {
+							deviceName = "PPS"
+						}
+					}
+
+					if strings.EqualFold(deviceName, parentCfg.ParentDevice) {
+						state, err := GetPinStateUint32(parentCfg.State)
+						if err != nil {
+							glog.Warningf("Invalid state '%s' for parent %s: %v", parentCfg.State, parentCfg.ParentDevice, err)
+							continue
+						}
+						pc := dpll.PinControl{
+							PinParentID: parent.ParentID,
+							State:       &state,
+						}
+						cmd.PinParentCtl = append(cmd.PinParentCtl, pc)
+					}
+				}
+			}
+		}
+
+		commands = append(commands, cmd)
+		argStr := strings.Join(cmdDef.Arguments, ", ")
+		if argStr == "" {
+			argStr = "none"
+		}
+		glog.Infof("  eSync cmd[%d] for pin %s: %s (args=[%s], parents=%d)",
+			len(commands), boardLabel, cmdDef.Description, argStr, len(cmd.PinParentCtl))
+	}
+
+	return commands
+}
+
+// resolvePinFrequency resolves the pin frequency configuration from PinConfig
+// Returns: (transferFrequency, esyncFrequency, dutyCyclePct, hasConfig)
+func (hcm *HardwareConfigManager) resolvePinFrequency(pinCfg types.PinConfig, clockChain *types.ClockChain) (uint64, uint64, int64, bool) {
+	// If eSyncConfigName is set, resolve from commonDefinitions
+	if pinCfg.ESyncConfigName != "" {
+		if clockChain == nil || clockChain.CommonDefinitions == nil {
+			glog.Warningf("eSync config '%s' referenced but no commonDefinitions", pinCfg.ESyncConfigName)
+			return 0, 0, 0, false
+		}
+
+		for _, esyncDef := range clockChain.CommonDefinitions.ESyncDefinitions {
+			if esyncDef.Name == pinCfg.ESyncConfigName {
+				transferFreq := uint64(esyncDef.ESyncConfig.TransferFrequency)
+				esyncFreq := uint64(esyncDef.ESyncConfig.EmbeddedSyncFrequency)
+				dutyCycle := esyncDef.ESyncConfig.DutyCyclePct
+
+				// Apply defaults
+				if esyncFreq == 0 {
+					esyncFreq = 1 // Default to 1Hz if not specified
+				}
+				if dutyCycle == 0 {
+					dutyCycle = 25 // Default to 25% if not specified
+				}
+
+				glog.Infof("Resolved eSync config '%s': transfer=%d Hz, esync=%d Hz, duty=%d%%",
+					esyncDef.Name, transferFreq, esyncFreq, dutyCycle)
+				return transferFreq, esyncFreq, dutyCycle, true
+			}
+		}
+		glog.Warningf("eSync config '%s' not found in commonDefinitions", pinCfg.ESyncConfigName)
+		return 0, 0, 0, false
+	}
+
+	// If frequency is directly specified, use it (no eSync, no duty cycle)
+	if pinCfg.Frequency != nil && *pinCfg.Frequency > 0 {
+		return uint64(*pinCfg.Frequency), 0, 0, true
+	}
+
+	// No frequency configuration
+	return 0, 0, 0, false
 }
 
 // buildPinPriorityCommand searches the pin cache by clock ID and board label and creates a priority command.

@@ -95,6 +95,12 @@ spec:
           - ens4f1
           sourceType: ptpTimeReceiver
       commonDefinitions:
+        eSyncDefinitions:
+        - name: esync-10-1
+          eSyncConfig:
+            transferFrequency: 10000000
+            embeddedSyncFrequency: 1
+            dutyCyclePct: 25
         clockIdentifiers:
         - alias: Leader
           clockId: "0x507c6fffff1fb1b8"
@@ -115,6 +121,7 @@ spec:
             REF-SMA1:
               connector: SMA1
               description: Output to the follower
+              eSyncConfigName: esync-10-1
         ethernet:
         - ports:
           - ens4f0
@@ -125,7 +132,8 @@ spec:
           clockId: Follower
           phaseInputs:
             SMA1:
-              connector: SMA1
+              connector: SMA1 
+              eSyncConfigName: esync-10-1
               description: Input from the leader
         ethernet:
         - ports:

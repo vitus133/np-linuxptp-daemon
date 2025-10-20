@@ -1007,3 +1007,190 @@ func TestSysFSCommandCaching(t *testing.T) {
 	err = hcm.applyCachedSysFSCommands("test-profile", "test-condition", commands)
 	assert.NoError(t, err)
 }
+
+// TestESyncConfigurationFromYAML tests loading and processing eSync configuration from hwconfig.yaml
+func TestESyncConfigurationFromYAML(t *testing.T) {
+	// Setup mock environment
+	SetupMockPtpDeviceResolver()
+	defer TeardownMockPtpDeviceResolver()
+	mockErr := SetupMockDpllPinsFromFileForTests()
+	if mockErr != nil {
+		t.Fatalf("Failed to setup mock DPLL pins: %v", mockErr)
+	}
+	defer TeardownMockDpllPinsForTests()
+
+	// Load the hwconfig.yaml which has eSync configuration
+	hwConfig, err := loadHardwareConfigFromFile("testdata/hwconfig.yaml")
+	assert.NoError(t, err, "Failed to load hwconfig.yaml")
+	assert.NotNil(t, hwConfig, "Hardware config should not be nil")
+
+	// Verify the clock chain structure
+	assert.NotNil(t, hwConfig.Spec.Profile.ClockChain, "Clock chain should not be nil")
+	clockChain := hwConfig.Spec.Profile.ClockChain
+
+	// Resolve clock aliases (Leader -> actual clock ID, etc.)
+	err = clockChain.ResolveClockAliases()
+	assert.NoError(t, err, "Failed to resolve clock aliases")
+	t.Logf("✓ Clock aliases resolved")
+
+	// Verify eSync definitions are present and correctly parsed
+	assert.NotNil(t, clockChain.CommonDefinitions, "CommonDefinitions should not be nil")
+	assert.NotEmpty(t, clockChain.CommonDefinitions.ESyncDefinitions, "ESyncDefinitions should not be empty")
+	assert.Len(t, clockChain.CommonDefinitions.ESyncDefinitions, 1, "Should have exactly 1 eSync definition")
+
+	// Verify the eSync definition values
+	esyncDef := clockChain.CommonDefinitions.ESyncDefinitions[0]
+	assert.Equal(t, "esync-10-1", esyncDef.Name, "eSync definition name should be 'esync-10-1'")
+	assert.Equal(t, int64(10000000), esyncDef.ESyncConfig.TransferFrequency, "Transfer frequency should be 10 MHz")
+	assert.Equal(t, int64(1), esyncDef.ESyncConfig.EmbeddedSyncFrequency, "Embedded sync frequency should be 1 Hz")
+	assert.Equal(t, int64(25), esyncDef.ESyncConfig.DutyCyclePct, "Duty cycle should be 25%")
+
+	t.Logf("✓ eSync definition '%s' loaded: transfer=%d Hz, esync=%d Hz, duty=%d%%",
+		esyncDef.Name,
+		esyncDef.ESyncConfig.TransferFrequency,
+		esyncDef.ESyncConfig.EmbeddedSyncFrequency,
+		esyncDef.ESyncConfig.DutyCyclePct)
+
+	// Verify subsystems reference the eSync config
+	assert.NotEmpty(t, clockChain.Structure, "Structure should not be empty")
+	assert.Len(t, clockChain.Structure, 2, "Should have exactly 2 subsystems (Leader and Follower)")
+
+	// Test eSync resolution logic
+	hcm := NewHardwareConfigManager()
+	hcm.pinCache, err = GetDpllPins()
+	assert.NoError(t, err, "Should get DPLL pins")
+	assert.NotNil(t, hcm.pinCache, "Pin cache should not be nil")
+
+	// Load hardware defaults for intel/e810 (same as used in the hwconfig.yaml)
+	hwSpec, err := LoadHardwareDefaults("intel/e810")
+	assert.NoError(t, err, "Should load hardware defaults")
+	assert.NotNil(t, hwSpec, "Hardware spec should not be nil")
+	assert.NotNil(t, hwSpec.PinEsyncCommands, "Pin eSync commands should be defined")
+	t.Logf("✓ Loaded hardware defaults: outputs=%d cmds, inputs=%d cmds",
+		len(hwSpec.PinEsyncCommands.Outputs), len(hwSpec.PinEsyncCommands.Inputs))
+
+	// Track total commands built across all subsystems
+	totalESyncCommands := 0
+	foundESyncCommand := false
+
+	// Verify ALL subsystems
+	for subIdx, subsystem := range clockChain.Structure {
+		t.Logf("\n--- Subsystem %d: %s ---", subIdx+1, subsystem.Name)
+		t.Logf("  Clock ID: %s (parsed: %#x)", subsystem.DPLL.ClockID, subsystem.DPLL.ClockIDParsed)
+
+		// Check phase outputs
+		for pinLabel, pinCfg := range subsystem.DPLL.PhaseOutputs {
+			if pinCfg.ESyncConfigName != "" {
+				t.Logf("  Phase output '%s': esyncConfigName='%s', connector='%s'",
+					pinLabel, pinCfg.ESyncConfigName, pinCfg.Connector)
+				assert.Equal(t, "esync-10-1", pinCfg.ESyncConfigName,
+					"Pin %s should reference esync-10-1", pinLabel)
+
+				// Test resolvePinFrequency
+				transferFreq, esyncFreq, dutyCycle, hasConfig := hcm.resolvePinFrequency(pinCfg, clockChain)
+				assert.True(t, hasConfig, "Should resolve frequency config for %s", pinLabel)
+				assert.Equal(t, uint64(10000000), transferFreq,
+					"Pin %s: transfer frequency should be 10 MHz", pinLabel)
+				assert.Equal(t, uint64(1), esyncFreq,
+					"Pin %s: eSync frequency should be 1 Hz", pinLabel)
+				assert.Equal(t, int64(25), dutyCycle,
+					"Pin %s: duty cycle should be 25%%", pinLabel)
+				t.Logf("    ✓ Resolved: transfer=%d Hz, esync=%d Hz, duty=%d%%", transferFreq, esyncFreq, dutyCycle)
+			}
+		}
+
+		// Check phase inputs
+		for pinLabel, pinCfg := range subsystem.DPLL.PhaseInputs {
+			if pinCfg.ESyncConfigName != "" {
+				t.Logf("  Phase input '%s': esyncConfigName='%s', connector='%s'",
+					pinLabel, pinCfg.ESyncConfigName, pinCfg.Connector)
+				assert.Equal(t, "esync-10-1", pinCfg.ESyncConfigName,
+					"Pin %s should reference esync-10-1", pinLabel)
+
+				// Test resolvePinFrequency
+				transferFreq, esyncFreq, dutyCycle, hasConfig := hcm.resolvePinFrequency(pinCfg, clockChain)
+				assert.True(t, hasConfig, "Should resolve frequency config for %s", pinLabel)
+				assert.Equal(t, uint64(10000000), transferFreq,
+					"Pin %s: transfer frequency should be 10 MHz", pinLabel)
+				assert.Equal(t, uint64(1), esyncFreq,
+					"Pin %s: eSync frequency should be 1 Hz", pinLabel)
+				assert.Equal(t, int64(25), dutyCycle,
+					"Pin %s: duty cycle should be 25%%", pinLabel)
+				t.Logf("    ✓ Resolved: transfer=%d Hz, esync=%d Hz, duty=%d%%", transferFreq, esyncFreq, dutyCycle)
+			}
+		}
+
+		// Test building eSync commands for this subsystem with hardware spec
+		commands, cmdErr := hcm.buildESyncPinCommands(subsystem, clockChain, hwSpec)
+		assert.NoError(t, cmdErr, "Should build eSync commands for subsystem %s", subsystem.Name)
+
+		t.Logf("  Built %d pin commands for subsystem '%s'", len(commands), subsystem.Name)
+
+		// Count pins with eSync config in this subsystem
+		outputPinsWithESync := 0
+		inputPinsWithESync := 0
+		for _, pinCfg := range subsystem.DPLL.PhaseOutputs {
+			if pinCfg.ESyncConfigName != "" {
+				outputPinsWithESync++
+			}
+		}
+		for _, pinCfg := range subsystem.DPLL.PhaseInputs {
+			if pinCfg.ESyncConfigName != "" {
+				inputPinsWithESync++
+			}
+		}
+
+		// Verify command sequence length
+		// Outputs: 3 commands per pin (frequency, eSyncFrequency, re-enable)
+		// Inputs: 2 commands per pin (frequency, eSyncFrequency)
+		expectedCmds := (outputPinsWithESync * 3) + (inputPinsWithESync * 2)
+		if expectedCmds > 0 {
+			assert.Equal(t, expectedCmds, len(commands),
+				"Should have %d commands for %d output pins and %d input pins",
+				expectedCmds, outputPinsWithESync, inputPinsWithESync)
+			t.Logf("  ✓ Command sequence: %d output pins × 3 cmds + %d input pins × 2 cmds = %d total",
+				outputPinsWithESync, inputPinsWithESync, len(commands))
+		}
+
+		// Verify commands with frequency/eSync set
+		for cmdIdx, cmd := range commands {
+			if cmd.Frequency != nil || cmd.EsyncFrequency != nil {
+				totalESyncCommands++
+				t.Logf("    Cmd[%d]: Pin ID=%d, Frequency=%v Hz, EsyncFrequency=%v Hz, ParentDevices=%d",
+					cmdIdx+1,
+					cmd.ID,
+					ptrValue(cmd.Frequency),
+					ptrValue(cmd.EsyncFrequency),
+					len(cmd.PinParentCtl))
+
+				// Verify frequency values when set
+				if cmd.Frequency != nil {
+					assert.Equal(t, uint64(10000000), *cmd.Frequency,
+						"Pin %d cmd[%d]: frequency should be 10 MHz", cmd.ID, cmdIdx+1)
+				}
+				if cmd.EsyncFrequency != nil {
+					assert.Equal(t, uint64(1), *cmd.EsyncFrequency,
+						"Pin %d cmd[%d]: eSync frequency should be 1 Hz", cmd.ID, cmdIdx+1)
+					foundESyncCommand = true
+				}
+			}
+		}
+	}
+
+	// Verify we found at least one properly configured eSync command
+	t.Logf("\nTotal eSync/frequency commands across all subsystems: %d", totalESyncCommands)
+	if totalESyncCommands > 0 {
+		assert.True(t, foundESyncCommand,
+			"Should have at least one command with both Frequency and EsyncFrequency set")
+	} else {
+		t.Log("⚠ No eSync commands generated - pins may not be in mock cache")
+	}
+}
+
+// Helper function to safely dereference pointer for logging
+func ptrValue(ptr *uint64) string {
+	if ptr == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *ptr)
+}
