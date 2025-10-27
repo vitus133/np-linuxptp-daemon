@@ -165,13 +165,16 @@ func NewLinuxPTPConfUpdate() (*LinuxPTPConfUpdate, error) {
 
 func (l *LinuxPTPConfUpdate) UpdateConfig(nodeProfilesJson []byte) error {
 	if bytes.Equal(l.appliedNodeProfileJson, nodeProfilesJson) {
+		glog.Info("UpdateConfig: config unchanged, skipping update")
 		return nil
 	}
 	if nodeProfiles, ok := tryToLoadConfig(nodeProfilesJson); ok {
-		glog.Info("load profiles")
+		glog.Infof("load profiles: %d profiles loaded", len(nodeProfiles))
 		l.appliedNodeProfileJson = nodeProfilesJson
 		l.NodeProfiles = nodeProfiles
+		glog.Info("Sending update signal to daemon via UpdateCh")
 		l.UpdateCh <- true
+		glog.Info("Update signal sent successfully")
 
 		return nil
 	}
