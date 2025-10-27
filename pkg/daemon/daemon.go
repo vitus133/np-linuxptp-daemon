@@ -268,6 +268,15 @@ func (dn *Daemon) UpdateHardwareConfig(hwConfigs []types.HardwareConfig) error {
 	return dn.hardwareConfigManager.UpdateHardwareConfig(hwConfigs)
 }
 
+// getHoldoverParameters retrieves holdover parameters from HardwareConfig for a specific clock ID
+// Returns nil if no hardware config is available or no parameters are configured for the clock
+func (dn *Daemon) getHoldoverParameters(profileName string, clockID uint64) *types.HoldoverParameters {
+	if dn.hardwareConfigManager == nil {
+		return nil
+	}
+	return dn.hardwareConfigManager.GetHoldoverParameters(profileName, clockID)
+}
+
 // New LinuxPTP is called by daemon to generate new linuxptp instance
 func New(
 	nodeName string,
@@ -836,6 +845,27 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 							clockId = i
 						}
 					}
+
+					// Try to get holdover parameters from HardwareConfig (new system)
+					// This takes precedence over plugin-provided values for better declarative configuration
+					profileName := ""
+					if nodeProfile.Name != nil {
+						profileName = *nodeProfile.Name
+					}
+					holdoverParams := dn.getHoldoverParameters(profileName, clockId)
+					if holdoverParams != nil {
+						// HardwareConfig provides holdover parameters - use them
+						maxInSpecOffset = holdoverParams.MaxInSpecOffset
+						localMaxHoldoverOffSet = holdoverParams.LocalMaxHoldoverOffset
+						localHoldoverTimeout = holdoverParams.LocalHoldoverTimeout
+						glog.Infof("Using holdover parameters from HardwareConfig for clock %#x: MaxInSpec=%dns, LocalMaxOffset=%dns, Timeout=%ds",
+							clockId, maxInSpecOffset, localMaxHoldoverOffSet, localHoldoverTimeout)
+					} else {
+						// Fall back to plugin/profile settings (backward compatibility)
+						glog.Infof("Using holdover parameters from profile/plugin for clock %#x: MaxInSpec=%dns, LocalMaxOffset=%dns, Timeout=%ds",
+							clockId, maxInSpecOffset, localMaxHoldoverOffSet, localHoldoverTimeout)
+					}
+
 					eventSource = []event.EventSource{iface.Source}
 					// pass array of ifaces which has source + clockId -
 					// here we have multiple dpll objects identified by clock id

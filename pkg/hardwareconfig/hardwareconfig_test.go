@@ -14,6 +14,7 @@ import (
 	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/types"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/kubernetes/scheme"
 )
@@ -1193,4 +1194,117 @@ func ptrValue(ptr *uint64) string {
 		return "nil"
 	}
 	return fmt.Sprintf("%d", *ptr)
+}
+
+// TestHoldoverParametersExtraction tests extraction of holdover parameters from HardwareConfig
+func TestHoldoverParametersExtraction(t *testing.T) {
+	// Create a test hardware config with holdover parameters
+	clockID1 := uint64(0x507c6fffff1fb1b8)
+	clockID2 := uint64(0x507c6fffff1fb580)
+
+	hwConfig := types.HardwareConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-holdover",
+			Namespace: "openshift-ptp",
+		},
+		Spec: types.HardwareConfigSpec{
+			RelatedPtpProfileName: "test-profile",
+			Profile: types.HardwareProfile{
+				ClockChain: &types.ClockChain{
+					CommonDefinitions: &types.CommonDefinitions{
+						ClockIdentifiers: []types.ClockIdentifier{},
+					},
+					Structure: []types.Subsystem{
+						{
+							Name: "Subsystem1",
+							DPLL: types.DPLL{
+								ClockID:       "0x507c6fffff1fb1b8",
+								ClockIDParsed: clockID1,
+								HoldoverParameters: &types.HoldoverParameters{
+									MaxInSpecOffset:        200,
+									LocalMaxHoldoverOffset: 2000,
+									LocalHoldoverTimeout:   7200,
+								},
+							},
+						},
+						{
+							Name: "Subsystem2",
+							DPLL: types.DPLL{
+								ClockID:       "0x507c6fffff1fb580",
+								ClockIDParsed: clockID2,
+								// Test defaults by omitting values
+								HoldoverParameters: &types.HoldoverParameters{},
+							},
+						},
+						{
+							Name: "Subsystem3-NoHoldover",
+							DPLL: types.DPLL{
+								ClockID:       "0x507c6fffff5c4ae8",
+								ClockIDParsed: 0x507c6fffff5c4ae8,
+								// No holdover parameters
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hcm := NewHardwareConfigManager()
+
+	// Test extractHoldoverParameters
+	params := hcm.extractHoldoverParameters(hwConfig)
+
+	// Should have 2 entries (Subsystem3 doesn't have holdover params)
+	assert.Len(t, params, 2, "Should extract holdover params for 2 subsystems")
+
+	// Check Subsystem1 - explicit values
+	params1, found1 := params[clockID1]
+	assert.True(t, found1, "Should find holdover params for clock1")
+	assert.NotNil(t, params1, "Holdover params for clock1 should not be nil")
+	assert.Equal(t, uint64(200), params1.MaxInSpecOffset, "MaxInSpecOffset should match")
+	assert.Equal(t, uint64(2000), params1.LocalMaxHoldoverOffset, "LocalMaxHoldoverOffset should match")
+	assert.Equal(t, uint64(7200), params1.LocalHoldoverTimeout, "LocalHoldoverTimeout should match")
+
+	// Check Subsystem2 - default values
+	params2, found2 := params[clockID2]
+	assert.True(t, found2, "Should find holdover params for clock2")
+	assert.NotNil(t, params2, "Holdover params for clock2 should not be nil")
+	assert.Equal(t, uint64(100), params2.MaxInSpecOffset, "MaxInSpecOffset should use default")
+	assert.Equal(t, uint64(1500), params2.LocalMaxHoldoverOffset, "LocalMaxHoldoverOffset should use default")
+	assert.Equal(t, uint64(14400), params2.LocalHoldoverTimeout, "LocalHoldoverTimeout should use default")
+
+	// Test GetHoldoverParameters API by manually setting the config
+	// (Avoid UpdateHardwareConfig which tries to connect to netlink)
+	enriched := enrichedHardwareConfig{
+		HardwareConfig: hwConfig,
+		holdoverParams: params,
+	}
+	hcm.mu.Lock()
+	hcm.hardwareConfigs = []enrichedHardwareConfig{enriched}
+	hcm.ready = true
+	hcm.mu.Unlock()
+
+	// Retrieve using API
+	retrieved1 := hcm.GetHoldoverParameters("test-profile", clockID1)
+	assert.NotNil(t, retrieved1, "Should retrieve holdover params for clock1")
+	if retrieved1 != nil {
+		assert.Equal(t, uint64(200), retrieved1.MaxInSpecOffset, "Retrieved MaxInSpecOffset should match")
+	}
+
+	retrieved2 := hcm.GetHoldoverParameters("test-profile", clockID2)
+	assert.NotNil(t, retrieved2, "Should retrieve holdover params for clock2")
+	if retrieved2 != nil {
+		assert.Equal(t, uint64(100), retrieved2.MaxInSpecOffset, "Retrieved MaxInSpecOffset should use default")
+	}
+
+	// Test non-existent profile
+	retrieved3 := hcm.GetHoldoverParameters("non-existent", clockID1)
+	assert.Nil(t, retrieved3, "Should return nil for non-existent profile")
+
+	// Test non-existent clock ID
+	retrieved4 := hcm.GetHoldoverParameters("test-profile", 0xDEADBEEF)
+	assert.Nil(t, retrieved4, "Should return nil for non-existent clock ID")
+
+	t.Logf("✓ Holdover parameter extraction and retrieval working correctly")
 }

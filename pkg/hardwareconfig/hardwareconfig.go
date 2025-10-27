@@ -187,6 +187,8 @@ type enrichedHardwareConfig struct {
 	// Static defaults derived from the clock chain structure (hardware-specific)
 	structurePinCommands   []dpll.PinParentDeviceCtl
 	structureSysFSCommands []SysFSCommand
+	// Holdover parameters mapped by clock ID
+	holdoverParams map[uint64]*types.HoldoverParameters
 }
 
 // HardwareConfigManager manages hardware configurations and their application
@@ -271,6 +273,13 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []types.Hardwar
 		glog.Infof("  structure: %d DPLL commands, %d sysfs commands", len(structPins), len(structSysfs))
 		prepared[i].structurePinCommands = structPins
 		prepared[i].structureSysFSCommands = structSysfs
+
+		// Extract holdover parameters from subsystems
+		holdoverParams := hcm.extractHoldoverParameters(hwConfig)
+		prepared[i].holdoverParams = holdoverParams
+		if len(holdoverParams) > 0 {
+			glog.Infof("  holdover: extracted parameters for %d DPLLs", len(holdoverParams))
+		}
 	}
 
 	hcm.setHardwareConfigs(prepared)
@@ -1230,4 +1239,61 @@ func (hcm *HardwareConfigManager) ReadyHardwareConfigForProfile(name string) boo
 		}
 	}
 	return false
+}
+
+// extractHoldoverParameters extracts holdover parameters from all subsystems in the clock chain
+func (hcm *HardwareConfigManager) extractHoldoverParameters(hwConfig types.HardwareConfig) map[uint64]*types.HoldoverParameters {
+	params := make(map[uint64]*types.HoldoverParameters)
+
+	if hwConfig.Spec.Profile.ClockChain == nil || len(hwConfig.Spec.Profile.ClockChain.Structure) == 0 {
+		return params
+	}
+
+	for _, subsystem := range hwConfig.Spec.Profile.ClockChain.Structure {
+		if subsystem.DPLL.HoldoverParameters != nil {
+			clockID := subsystem.DPLL.ClockIDParsed
+			if clockID == 0 {
+				glog.Warningf("Subsystem %s has holdover parameters but clock ID is 0", subsystem.Name)
+				continue
+			}
+
+			// Apply defaults if values are not specified
+			hoParams := *subsystem.DPLL.HoldoverParameters // Copy the struct
+			if hoParams.MaxInSpecOffset == 0 {
+				hoParams.MaxInSpecOffset = 100 // Default: 100ns
+			}
+			if hoParams.LocalMaxHoldoverOffset == 0 {
+				hoParams.LocalMaxHoldoverOffset = 1500 // Default: 1500ns
+			}
+			if hoParams.LocalHoldoverTimeout == 0 {
+				hoParams.LocalHoldoverTimeout = 14400 // Default: 14400s (4 hours)
+			}
+
+			params[clockID] = &hoParams
+			glog.Infof("  Holdover params for clock %#x (subsystem %s): MaxInSpec=%dns, LocalMaxOffset=%dns, Timeout=%ds",
+				clockID, subsystem.Name,
+				hoParams.MaxInSpecOffset,
+				hoParams.LocalMaxHoldoverOffset,
+				hoParams.LocalHoldoverTimeout)
+		}
+	}
+
+	return params
+}
+
+// GetHoldoverParameters returns holdover parameters for a specific clock ID from the given profile
+// Returns nil if no holdover parameters are configured for the clock ID
+func (hcm *HardwareConfigManager) GetHoldoverParameters(profileName string, clockID uint64) *types.HoldoverParameters {
+	hcm.mu.RLock()
+	defer hcm.mu.RUnlock()
+
+	for _, hwConfig := range hcm.hardwareConfigs {
+		if hwConfig.Spec.RelatedPtpProfileName == profileName {
+			if params, found := hwConfig.holdoverParams[clockID]; found {
+				return params
+			}
+		}
+	}
+
+	return nil
 }
