@@ -41,8 +41,8 @@ const (
 	MaxInSpecOffset ValueType = "max-in-spec"
 	// FaultyPhaseOffset is a value assigned to the phase offset when free-running
 	FaultyPhaseOffset int64 = 99999999999
-	// StaleEventAfter is the number of seconds after which an event is considered stale
-	StaleEventAfter int64 = 2
+	// StaleEventAfter is the number of milliseconds after which an event is considered stale
+	StaleEventAfter int64 = 2000
 )
 
 // LeadingClockParams ... leading clock parameters includes state
@@ -417,7 +417,7 @@ func (e *EventHandler) getLargestOffset(cfgName string) int64 {
 			for _, dd := range d.Details {
 				if worstOffset == FaultyPhaseOffset {
 					worstOffset = dd.Offset
-				} else if !(dd.time < time.Now().Unix()-StaleEventAfter) && math.Abs(float64(dd.Offset)) > math.Abs(float64(worstOffset)) {
+				} else if !(dd.time < (time.Now().UnixMilli() - StaleEventAfter)) && math.Abs(float64(dd.Offset)) > math.Abs(float64(worstOffset)) {
 					worstOffset = dd.Offset
 				}
 			}
