@@ -40,10 +40,11 @@ import (
 var GitCommit = "Undefined"
 
 type cliParams struct {
-	updateInterval  int
-	profileDir      string
-	pmcPollInterval int
-	useController   bool
+	updateInterval            int
+	profileDir                string
+	pmcPollInterval           int
+	useController             bool
+	enablePtpConfigController bool
 }
 
 var (
@@ -73,7 +74,9 @@ func flagInit(cp *cliParams) {
 	flag.IntVar(&cp.pmcPollInterval, "pmc-poll-interval", config.DefaultPmcPollInterval,
 		"Interval for periodical PMC poll")
 	flag.BoolVar(&cp.useController, "use-controller", true,
-		"Use Kubernetes controller to watch PtpConfig resources (default: false)")
+		"Use Kubernetes controller manager (required for HardwareConfig support)")
+	flag.BoolVar(&cp.enablePtpConfigController, "enable-ptpconfig-controller", false,
+		"Enable PtpConfig controller to watch PtpConfig CRs (default: false, uses file-based config)")
 }
 
 func main() {
@@ -86,6 +89,8 @@ func main() {
 	glog.Infof("resync period set to: %d [s]", cp.updateInterval)
 	glog.Infof("linuxptp profile path set to: %s", cp.profileDir)
 	glog.Infof("pmc poll interval set to: %d [s]", cp.pmcPollInterval)
+	glog.Infof("use controller: %v", cp.useController)
+	glog.Infof("enable PtpConfig controller: %v", cp.enablePtpConfigController)
 
 	cfg, err := config.GetKubeConfig()
 	if err != nil {
@@ -198,7 +203,7 @@ func main() {
 	var mgrCtx context.Context
 	var mgrCancel context.CancelFunc
 	if cp.useController {
-		glog.Info("Setting up controller manager for PtpConfig resources")
+		glog.Info("Setting up controller manager")
 
 		// Setup controller-runtime logger to use klog/glog
 		ctrl.SetLogger(klog.NewKlogr())
@@ -226,20 +231,27 @@ func main() {
 			return
 		}
 
-		// Setup PtpConfig controller
-		ptpConfigReconciler := &controller.PtpConfigReconciler{
-			Client:       mgr.GetClient(),
-			Scheme:       mgr.GetScheme(),
-			NodeName:     nodeName,
-			ConfigUpdate: ptpConfUpdate,
+		// Setup PtpConfig controller (optional)
+		if cp.enablePtpConfigController {
+			glog.Info("Setting up PtpConfig controller (watching PtpConfig CRs)")
+			ptpConfigReconciler := &controller.PtpConfigReconciler{
+				Client:       mgr.GetClient(),
+				Scheme:       mgr.GetScheme(),
+				NodeName:     nodeName,
+				ConfigUpdate: ptpConfUpdate,
+			}
+
+			if err1 = ptpConfigReconciler.SetupWithManager(mgr); err1 != nil {
+				glog.Errorf("unable to create controller for PtpConfig: %v", err1)
+				return
+			}
+			glog.Info("PtpConfig controller registered successfully")
+		} else {
+			glog.Info("PtpConfig controller disabled - will use file-based configuration")
 		}
 
-		if err1 = ptpConfigReconciler.SetupWithManager(mgr); err1 != nil {
-			glog.Errorf("unable to create controller for PtpConfig: %v", err1)
-			return
-		}
-
-		// Setup HardwareConfig controller
+		// Setup HardwareConfig controller (always enabled when controller manager is active)
+		glog.Info("Setting up HardwareConfig controller")
 		hwConfigReconciler := &controller.HardwareConfigReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
@@ -256,6 +268,7 @@ func main() {
 			glog.Errorf("unable to create controller for HardwareConfig: %v", err1)
 			return
 		}
+		glog.Info("HardwareConfig controller registered successfully")
 
 		// Start the manager in a goroutine
 		mgrCtx, mgrCancel = context.WithCancel(context.Background())
@@ -278,55 +291,95 @@ func main() {
 	time.Sleep(time.Second * time.Duration(cp.updateInterval/2))
 
 	if cp.useController {
-		// When using controller mode, we only need to handle device status updates and shutdown signals
-		// The controller will handle configuration updates automatically via PtpConfig watches
-		glog.Info("Running in controller mode - PtpConfig resources will be watched automatically")
+		// When using controller mode with PtpConfig controller enabled
+		if cp.enablePtpConfigController {
+			glog.Info("Running in full controller mode - PtpConfig and HardwareConfig resources will be watched automatically")
 
-		// Trigger initial reconciliation by listing all PtpConfigs
-		go func() {
-			time.Sleep(2 * time.Second) // Give controller time to start
-			glog.Info("Triggering initial PtpConfig reconciliation")
+			// Trigger initial reconciliation by listing all PtpConfigs
+			go func() {
+				time.Sleep(2 * time.Second) // Give controller time to start
+				glog.Info("Triggering initial PtpConfig reconciliation")
 
-			// Force initial reconciliation by calling the controller directly
-			ptpConfigReconciler := &controller.PtpConfigReconciler{
-				Client:       mgr.GetClient(),
-				Scheme:       mgr.GetScheme(),
-				NodeName:     nodeName,
-				ConfigUpdate: ptpConfUpdate,
-			}
-
-			// Trigger reconciliation for any existing PtpConfigs
-			_, err1 := ptpConfigReconciler.Reconcile(context.Background(), ctrl.Request{})
-			if err1 != nil {
-				glog.Errorf("Initial reconciliation failed: %v", err1)
-			}
-		}()
-
-		for {
-			select {
-			case <-tickerPull.C:
-				glog.Infof("ticker pull (controller mode)")
-				// Run a loop to update the device status
-				if refreshNodePtpDevice {
-					go daemon.RunDeviceStatusUpdate(ptpClient, nodeName, &hwconfigs)
-					refreshNodePtpDevice = false
+				// Force initial reconciliation by calling the controller directly
+				ptpConfigReconciler := &controller.PtpConfigReconciler{
+					Client:       mgr.GetClient(),
+					Scheme:       mgr.GetScheme(),
+					NodeName:     nodeName,
+					ConfigUpdate: ptpConfUpdate,
 				}
-			case sig := <-sigCh:
-				glog.Info("signal received, shutting down", sig)
-				closeProcessManager <- true
-				if mgrCancel != nil {
-					mgrCancel() // Stop the controller manager
+
+				// Trigger reconciliation for any existing PtpConfigs
+				_, err1 := ptpConfigReconciler.Reconcile(context.Background(), ctrl.Request{})
+				if err1 != nil {
+					glog.Errorf("Initial reconciliation failed: %v", err1)
 				}
-				return
+			}()
+
+			for {
+				select {
+				case <-tickerPull.C:
+					glog.Infof("ticker pull (full controller mode)")
+					// Run a loop to update the device status
+					if refreshNodePtpDevice {
+						go daemon.RunDeviceStatusUpdate(ptpClient, nodeName, &hwconfigs)
+						refreshNodePtpDevice = false
+					}
+				case sig := <-sigCh:
+					glog.Info("signal received, shutting down", sig)
+					closeProcessManager <- true
+					if mgrCancel != nil {
+						mgrCancel() // Stop the controller manager
+					}
+					return
+				}
+			}
+		} else {
+			// Hybrid mode: HardwareConfig controller + file-based PtpConfig
+			glog.Info("Running in hybrid mode - HardwareConfig controller active, PtpConfig from files")
+
+			for {
+				select {
+				case <-tickerPull.C:
+					glog.Infof("ticker pull (hybrid mode)")
+					// Run a loop to update the device status
+					if refreshNodePtpDevice {
+						go daemon.RunDeviceStatusUpdate(ptpClient, nodeName, &hwconfigs)
+						refreshNodePtpDevice = false
+					}
+
+					// Read PtpConfig from file (legacy mode)
+					nodeProfile := filepath.Join(cp.profileDir, nodeName)
+					if _, err1 := os.Stat(nodeProfile); err1 != nil {
+						glog.Errorf("error stating node profile %v: %v", nodeName, err1)
+						continue
+					}
+					nodeProfilesJSON, err1 := os.ReadFile(nodeProfile)
+					if err1 != nil {
+						glog.Errorf("error reading node profile: %v", nodeProfile)
+						continue
+					}
+
+					err = ptpConfUpdate.UpdateConfig(nodeProfilesJSON)
+					if err != nil {
+						glog.Errorf("error updating the node configuration using the profiles loaded: %v", err)
+					}
+				case sig := <-sigCh:
+					glog.Info("signal received, shutting down", sig)
+					closeProcessManager <- true
+					if mgrCancel != nil {
+						mgrCancel() // Stop the controller manager
+					}
+					return
+				}
 			}
 		}
 	} else {
-		// Legacy file-based mode
-		glog.Info("Running in legacy file-based mode")
+		// Legacy file-based mode (no controllers)
+		glog.Info("Running in legacy file-based mode (no controllers)")
 		for {
 			select {
 			case <-tickerPull.C:
-				glog.Infof("ticker pull (file mode)")
+				glog.Infof("ticker pull (legacy mode)")
 				// Run a loop to update the device status
 				if refreshNodePtpDevice {
 					go daemon.RunDeviceStatusUpdate(ptpClient, nodeName, &hwconfigs)

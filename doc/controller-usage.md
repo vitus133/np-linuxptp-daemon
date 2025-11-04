@@ -1,19 +1,47 @@
 # LinuxPTP Daemon with Kubernetes Controller
 
-This document describes how to use the LinuxPTP daemon with Kubernetes controller support for watching `PtpConfig` custom resources.
+This document describes how to use the LinuxPTP daemon with Kubernetes controller support for watching `PtpConfig` and `HardwareConfig` custom resources.
 
 ## Overview
 
-The LinuxPTP daemon now supports two modes of operation (controller mode is disabled by default; enable with `--use-controller=true`):
+The LinuxPTP daemon supports three modes of operation:
 
-1. **Controller Mode**: Watches `PtpConfig` and `HardwareConfig` custom resources and automatically applies matching configurations
-2. **Legacy File Mode**: Reads configuration from mounted ConfigMaps (backward compatibility)
+1. **Legacy File Mode** (`--use-controller=false`): Reads configuration from mounted ConfigMaps (backward compatibility, no controllers)
+2. **Hybrid Mode** (`--use-controller=true --enable-ptpconfig-controller=false`): HardwareConfig controller active, PtpConfig from files (**recommended for safe hwconfig introduction**)
+3. **Full Controller Mode** (`--use-controller=true --enable-ptpconfig-controller=true`): Both PtpConfig and HardwareConfig controllers active
 
-## Controller Mode
+## Mode Comparison
+
+| Mode | PtpConfig Source | HardwareConfig Source | Use Case |
+|------|------------------|----------------------|----------|
+| **Legacy File** | ConfigMap files | N/A | Backward compatibility, no controller infrastructure |
+| **Hybrid** | ConfigMap files | HardwareConfig CRs | Introduce HardwareConfig without disrupting PtpConfig workflow |
+| **Full Controller** | PtpConfig CRs | HardwareConfig CRs | Complete Kubernetes-native configuration management |
+
+## Hybrid Mode (Recommended for HwConfig Introduction)
+
+### Overview
+
+Hybrid mode allows you to introduce HardwareConfig controller support without changing how PtpConfig is managed. This provides a safe migration path.
 
 ### Features
 
-- **Automatic Configuration**: Watches `PtpConfig` and `HardwareConfig` CRDs across the cluster
+- **HardwareConfig Controller**: Watches `HardwareConfig` CRDs across the cluster and applies hardware-specific settings
+- **File-based PtpConfig**: Continues to read PtpConfig from mounted ConfigMaps (existing workflow unchanged)
+- **Unified Restart**: Both HardwareConfig changes and PtpConfig file changes trigger the same restart mechanism
+- **Safe Migration**: Reduces risk by only introducing HardwareConfig controller behavior
+
+### When to Use
+
+- **Introducing HardwareConfig**: When you want to add HardwareConfig support to an existing deployment without disrupting PtpConfig management
+- **Testing**: To test HardwareConfig functionality independently
+- **Gradual Migration**: As a stepping stone before moving to full controller mode
+
+## Full Controller Mode
+
+### Features
+
+- **Automatic Configuration**: Watches both `PtpConfig` and `HardwareConfig` CRDs across the cluster
 - **Node Matching**: Applies configurations based on node name and label selectors  
 - **Priority-based Selection**: When multiple recommendations match, highest priority wins
 - **Hardware Configuration**: Applies hardware-specific settings for PTP devices
@@ -30,6 +58,13 @@ The LinuxPTP daemon now supports two modes of operation (controller mode is disa
 
 ### Configuration Flow
 
+**Hybrid Mode:**
+```
+PtpConfig File → Periodic Read → Daemon Config Update → PTP Process Restart
+HardwareConfig CRD → Controller → Check Active Profile Association → Unified Restart Trigger → PTP Process Restart
+```
+
+**Full Controller Mode:**
 ```
 PtpConfig CRD → Controller → Node Matching → Profile Selection → Daemon Config Update → PTP Process Restart
 HardwareConfig CRD → Controller → Check Active Profile Association → Unified Restart Trigger → PTP Process Restart
@@ -114,12 +149,30 @@ spec:
 
 ### Deployment
 
-The daemon deployment includes:
+**Hybrid Mode Deployment (Recommended for HwConfig Introduction):**
 
 ```yaml
 containers:
 - name: linuxptp-daemon-container
-  args: ["/usr/local/bin/ptp --alsologtostderr --use-controller=true"]
+  args: ["/usr/local/bin/ptp --alsologtostderr --use-controller=true --enable-ptpconfig-controller=false"]
+  ports:
+  - name: metrics
+    containerPort: 9091
+  - name: health  
+    containerPort: 8081
+  - name: controller-health
+    containerPort: 8082
+  volumeMounts:
+  - name: config-volume
+    mountPath: /etc/linuxptp  # For file-based PtpConfig
+```
+
+**Full Controller Mode Deployment:**
+
+```yaml
+containers:
+- name: linuxptp-daemon-container
+  args: ["/usr/local/bin/ptp --alsologtostderr --use-controller=true --enable-ptpconfig-controller=true"]
   ports:
   - name: metrics
     containerPort: 9091
@@ -131,7 +184,26 @@ containers:
 
 ### RBAC Requirements
 
-Controller mode requires additional cluster-level permissions:
+**Hybrid Mode** (requires HardwareConfig permissions only):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: linuxptp-daemon-cluster-role
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["ptp.openshift.io"]
+  resources: ["hardwareconfigs"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["ptp.openshift.io"]
+  resources: ["hardwareconfigs/status"]
+  verbs: ["get", "update", "patch"]
+```
+
+**Full Controller Mode** (requires both PtpConfig and HardwareConfig permissions):
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -158,7 +230,9 @@ rules:
 
 ## Command Line Options
 
-- `--use-controller=true/false`: Enable/disable controller mode (default: false)
+- `--use-controller=true/false`: Enable/disable controller manager (required for HardwareConfig support, default: true)
+- `--enable-ptpconfig-controller=true/false`: Enable/disable PtpConfig controller (default: false, uses file-based config)
+- `--linuxptp-profile-path=/path`: Path to read file-based PtpConfig (default: /etc/linuxptp, used when PtpConfig controller is disabled)
 - `--update-interval=30`: Status update interval in seconds
 - `--pmc-poll-interval=2`: PMC polling interval in seconds
 
@@ -203,22 +277,42 @@ Updating daemon configuration with 1 profiles for node worker-1
 2. **Controller not starting**: Verify RBAC permissions and cluster connectivity
 3. **Config not applying**: Check controller logs for reconciliation errors
 
-## Migration from File Mode
+## Migration Paths
 
-To migrate from file-based configuration:
+### Introducing HardwareConfig (Recommended)
 
-1. Deploy new RBAC permissions
-2. Create equivalent `PtpConfig` resources
-3. Update daemon deployment to remove ConfigMap volumes  
-4. Set `--use-controller=true`
-5. Remove old ConfigMaps after verification
+To add HardwareConfig support without disrupting existing PtpConfig workflow:
+
+1. **Deploy RBAC permissions** for HardwareConfig (see Hybrid Mode RBAC above)
+2. **Update daemon deployment** to use hybrid mode:
+   ```bash
+   --use-controller=true --enable-ptpconfig-controller=false
+   ```
+3. **Keep ConfigMap volumes** mounted for file-based PtpConfig
+4. **Create HardwareConfig CRs** as needed
+5. **Verify** HardwareConfig functionality
+6. **Optionally migrate** to full controller mode later (see below)
+
+### Migrating to Full Controller Mode
+
+After successfully running hybrid mode, migrate to full controller mode:
+
+1. **Deploy full RBAC permissions** (see Full Controller Mode RBAC above)
+2. **Create equivalent `PtpConfig` CRs** for all existing file-based configs
+3. **Update daemon deployment** to enable PtpConfig controller:
+   ```bash
+   --use-controller=true --enable-ptpconfig-controller=true
+   ```
+4. **Remove ConfigMap volumes** from deployment (no longer needed)
+5. **Verify** both PtpConfig and HardwareConfig functionality
+6. **Remove old ConfigMaps** after verification
 
 ## Legacy File Mode
 
-For backward compatibility, file mode can still be used:
+For backward compatibility, file mode (no controllers) can still be used:
 
 ```bash
 /usr/local/bin/ptp --use-controller=false --linuxptp-profile-path=/etc/linuxptp
 ```
 
-This mode reads configuration from mounted ConfigMap files as before.
+This mode reads configuration from mounted ConfigMap files as before and does not use any controller infrastructure.
