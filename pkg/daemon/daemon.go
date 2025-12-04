@@ -502,6 +502,7 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	dn.readyTracker.setConfig(false)
 
 	glog.Infof("in applyNodePTPProfiles - starting to apply %d node profiles", len(dn.ptpUpdate.NodeProfiles))
+
 	dn.stopAllProcesses()
 	// All process should have been stopped,
 	// clear process in process manager.
@@ -537,6 +538,20 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	})
 
 	relations := reconcileRelatedProfiles(dn.ptpUpdate.NodeProfiles)
+
+	// Update PtpConfig in hardware config manager for clock chain resolution
+	// This is done after sorting and reconciliation to ensure we use the same
+	// processed profiles that will actually be applied. The NodeProfiles are already
+	// filtered to be relevant for this node by calculateNodeProfiles in the controller.
+	if dn.hardwareConfigManager != nil && len(dn.ptpUpdate.NodeProfiles) > 0 {
+		ptpConfig := &ptpv1.PtpConfig{
+			Spec: ptpv1.PtpConfigSpec{
+				Profile: dn.ptpUpdate.NodeProfiles,
+			},
+		}
+		dn.hardwareConfigManager.SetPtpConfig(ptpConfig)
+		glog.Infof("Updated PtpConfig in hardware config manager with %d profiles (after sorting and reconciliation)", len(dn.ptpUpdate.NodeProfiles))
+	}
 	// TODO: resolve clock IDs, clockType, leadingInterface and upstreamPort from hardware config
 	// (needed to keep code compatibility elsewhere and allow it to work both with hardware config and plugins)
 	for _, profile := range dn.ptpUpdate.NodeProfiles {

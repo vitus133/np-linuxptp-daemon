@@ -211,9 +211,11 @@ type HardwareConfigManager struct {
 	hwDefaultsCache map[string]*HardwareDefaults
 	// cache of resolved clock IDs keyed by "interface:hwDefPath" to avoid repeated resolution
 	clockIDCache map[string]uint64
-	mu           sync.RWMutex
-	cond         *sync.Cond
-	ready        bool
+	// current PtpConfig used for resolving clock chains (optional)
+	ptpConfig *ptpv1.PtpConfig
+	mu        sync.RWMutex
+	cond      *sync.Cond
+	ready     bool
 }
 
 // NewHardwareConfigManager creates a new hardware config manager
@@ -295,28 +297,42 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []ptpv2alpha1.H
 
 	prepared := make([]enrichedHardwareConfig, len(hwConfigs))
 	for i, hwConfig := range hwConfigs {
-		prepared[i] = enrichedHardwareConfig{HardwareConfig: hwConfig}
+		// Resolve clock chain if clockType is specified
+		resolvedConfig := &hwConfig
+		if hwConfig.Spec.Profile.ClockType != nil {
+			var err error
+			hcm.mu.RLock()
+			ptpConfig := hcm.ptpConfig
+			hcm.mu.RUnlock()
+			resolvedConfig, err = ResolveClockChain(&hwConfig, ptpConfig)
+			if err != nil {
+				return fmt.Errorf("failed to resolve clock chain for hardware config %s: %w", hwConfig.Name, err)
+			}
+			glog.Infof("Resolved clock chain for hardware config '%s' (clockType: %s)", hwConfig.Name, *hwConfig.Spec.Profile.ClockType)
+		}
 
-		glog.Infof("Resolving hardware config '%s' (%d/%d)", hwConfig.Name, i+1, len(hwConfigs))
+		prepared[i] = enrichedHardwareConfig{HardwareConfig: *resolvedConfig}
 
-		dpllCommands, sysFSCommands, behaviorErr := hcm.resolveClockChainBehavior(hwConfig)
+		glog.Infof("Resolving hardware config '%s' (%d/%d)", resolvedConfig.Name, i+1, len(hwConfigs))
+
+		dpllCommands, sysFSCommands, behaviorErr := hcm.resolveClockChainBehavior(*resolvedConfig)
 		if behaviorErr != nil {
-			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, behaviorErr)
+			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", resolvedConfig.Name, behaviorErr)
 		}
 		glog.Infof("  behavior: %d conditions with DPLL commands, %d conditions with sysfs commands", len(dpllCommands), len(sysFSCommands))
 		prepared[i].dpllPinCommands = dpllCommands
 		prepared[i].sysFSCommands = sysFSCommands
 
-		structPins, structSysfs, structErr := hcm.resolveClockChainStructure(hwConfig)
+		structPins, structSysfs, structErr := hcm.resolveClockChainStructure(*resolvedConfig)
 		if structErr != nil {
-			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", hwConfig.Name, structErr)
+			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", resolvedConfig.Name, structErr)
 		}
 		glog.Infof("  structure: %d DPLL commands, %d sysfs commands", len(structPins), len(structSysfs))
 		prepared[i].structurePinCommands = structPins
 		prepared[i].structureSysFSCommands = structSysfs
 
 		// Extract holdover parameters from subsystems
-		holdoverParams := hcm.extractHoldoverParameters(hwConfig)
+		holdoverParams := hcm.extractHoldoverParameters(*resolvedConfig)
 		prepared[i].holdoverParams = holdoverParams
 		if len(holdoverParams) > 0 {
 			glog.Infof("  holdover: extracted parameters for %d DPLLs", len(holdoverParams))
@@ -325,6 +341,20 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []ptpv2alpha1.H
 
 	hcm.setHardwareConfigs(prepared)
 	return nil
+}
+
+// SetPtpConfig sets the current PtpConfig used for resolving clock chains
+// This should be called when PtpConfig is updated so that hardwareconfigs
+// with clockType can be resolved using the related ptpProfile
+func (hcm *HardwareConfigManager) SetPtpConfig(ptpConfig *ptpv1.PtpConfig) {
+	hcm.mu.Lock()
+	defer hcm.mu.Unlock()
+	hcm.ptpConfig = ptpConfig
+	if ptpConfig != nil {
+		glog.Infof("Updated PtpConfig in HardwareConfigManager (%d profiles)", len(ptpConfig.Spec.Profile))
+	} else {
+		glog.Infof("Cleared PtpConfig in HardwareConfigManager")
+	}
 }
 
 // CloneHardwareConfigs returns a deep copy of the current hardware configurations

@@ -1,0 +1,13 @@
+apiVersion: ptp.openshift.io/v2alpha1
+kind: HardwareConfig
+metadata:
+  name: t-bc-minimal
+spec:
+  profile:
+    clockType: T-BC
+    clockChain:
+      structure:
+        - name: leader
+          hardwareSpecificDefinitions: intel/e825
+          # DPLL, Ethernet, and Ports will be derived from ptpconfig
+  relatedPtpProfileName: 01-tbc-tr
