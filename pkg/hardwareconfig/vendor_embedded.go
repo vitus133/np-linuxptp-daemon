@@ -10,8 +10,12 @@ import (
 //go:embed hardware-vendor/intel/e810/defaults.yaml
 var intelE810DefaultsYAML []byte
 
+//go:embed hardware-vendor/intel/e825/defaults.yaml
+var intelE825DefaultsYAML []byte
+
 // embeddedDefaults maps hwDefPath -> raw YAML contents.
 // Example key: "intel/e810"
 var embeddedDefaults = map[string][]byte{
 	"intel/e810": intelE810DefaultsYAML,
+	"intel/e825": intelE825DefaultsYAML,
 }
