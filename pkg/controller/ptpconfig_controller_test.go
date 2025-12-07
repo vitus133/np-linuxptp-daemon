@@ -10,6 +10,8 @@ import (
 )
 
 func TestDoesRecommendationMatch(t *testing.T) {
+	reconciler := &PtpConfigReconciler{}
+
 	testCases := []struct {
 		name          string
 		recommend     ptpv1.PtpRecommend
@@ -104,7 +106,7 @@ func TestDoesRecommendationMatch(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := anyRuleMatchesNode(tc.recommend.Match, tc.nodeName, tc.nodeLabels)
+			result := reconciler.doesRecommendationMatch(tc.recommend, tc.nodeName, tc.nodeLabels)
 			assert.Equal(t, tc.expectedMatch, result)
 		})
 	}
@@ -348,6 +350,10 @@ func TestCalculateNodeProfiles(t *testing.T) {
 			// Test the core profile selection logic without needing a real K8s client
 			// This tests the algorithm that processes PtpConfigs and applies matching rules
 
+			reconciler := &PtpConfigReconciler{
+				NodeName: tc.nodeName,
+			}
+
 			// Simulate the profile calculation logic without the node fetch
 			// First, collect all matching recommendations across all configs
 			type matchedRecommendation struct {
@@ -361,7 +367,7 @@ func TestCalculateNodeProfiles(t *testing.T) {
 			// Process each PtpConfig and find ALL matching recommendations
 			for _, ptpConfig := range tc.ptpConfigs {
 				for _, recommend := range ptpConfig.Spec.Recommend {
-					if anyRuleMatchesNode(recommend.Match, tc.nodeName, tc.nodeLabels) {
+					if reconciler.doesRecommendationMatch(recommend, tc.nodeName, tc.nodeLabels) {
 						priority := int64(0)
 						if recommend.Priority != nil {
 							priority = *recommend.Priority

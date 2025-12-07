@@ -231,6 +231,7 @@ func GetClockIDFromInterfaceWithCache(iface string, hwDefPath string, pinCache *
 	if busAddr == "" {
 		return 0, fmt.Errorf("no bus-info found for interface %s", iface)
 	}
+	glog.V(4).Infof("ClockID: iface=%s bus=%s hwDef=%s", iface, busAddr, hwDefPath)
 
 	// Step 2: PERLA workaround - Check if this is an E825 device
 	// For E825 devices, there's no direct NIC-DPLL association, so we look for the zl3073x DPLL
@@ -284,6 +285,7 @@ func GetClockIDFromInterfaceWithCache(iface string, hwDefPath string, pinCache *
 	if serialNumber == "" {
 		return 0, fmt.Errorf("no serial_number found for interface %s (bus: %s)", iface, busAddr)
 	}
+	glog.V(4).Infof("ClockID: iface=%s bus=%s serial=%s hwDef=%s", iface, busAddr, serialNumber, hwDefPath)
 
 	// Step 4: Select hardware-specific transformer based on hardware defaults (when provided)
 	if hwDefPath == "" {
@@ -298,6 +300,7 @@ func GetClockIDFromInterfaceWithCache(iface string, hwDefPath string, pinCache *
 	}
 
 	glog.Infof("Resolved clock ID %#x for interface %s (bus: %s, serial: %s)", clockID, iface, busAddr, serialNumber)
+	glog.V(4).Infof("ClockID detail: iface=%s bus=%s serial=%s hwDef=%s clockID=%#x", iface, busAddr, serialNumber, hwDefPath, clockID)
 	return clockID, nil
 }
 

@@ -211,9 +211,11 @@ type HardwareConfigManager struct {
 	hwDefaultsCache map[string]*HardwareDefaults
 	// cache of resolved clock IDs keyed by "interface:hwDefPath" to avoid repeated resolution
 	clockIDCache map[string]uint64
-	mu           sync.RWMutex
-	cond         *sync.Cond
-	ready        bool
+	// current PtpConfig used for resolving clock chains (optional)
+	ptpConfig *ptpv1.PtpConfig
+	mu        sync.RWMutex
+	cond      *sync.Cond
+	ready     bool
 }
 
 // NewHardwareConfigManager creates a new hardware config manager
@@ -249,6 +251,9 @@ func (hcm *HardwareConfigManager) getClockIDCached(iface string, hwDefPath strin
 	clockID, err := GetClockIDFromInterfaceWithCache(iface, hwDefPath, hcm.pinCache)
 	if err != nil {
 		return 0, err
+	}
+	if clockID == 0 {
+		return 0, fmt.Errorf("resolved clock ID is zero for interface %s (hwDef: %s)", iface, hwDefPath)
 	}
 
 	// Cache the result
@@ -295,28 +300,41 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []ptpv2alpha1.H
 
 	prepared := make([]enrichedHardwareConfig, len(hwConfigs))
 	for i, hwConfig := range hwConfigs {
-		prepared[i] = enrichedHardwareConfig{HardwareConfig: hwConfig}
+		// Resolve clock chain if clockType is specified
+		resolvedConfig := &hwConfig
+		if hwConfig.Spec.Profile.ClockType != nil {
+			hcm.mu.RLock()
+			ptpConfig := hcm.ptpConfig
+			hcm.mu.RUnlock()
+			resolvedConfig, err = ResolveClockChain(&hwConfig, ptpConfig)
+			if err != nil {
+				return fmt.Errorf("failed to resolve clock chain for hardware config %s: %w", hwConfig.Name, err)
+			}
+			glog.Infof("Resolved clock chain for hardware config '%s' (clockType: %s)", hwConfig.Name, *hwConfig.Spec.Profile.ClockType)
+		}
 
-		glog.Infof("Resolving hardware config '%s' (%d/%d)", hwConfig.Name, i+1, len(hwConfigs))
+		prepared[i] = enrichedHardwareConfig{HardwareConfig: *resolvedConfig}
 
-		dpllCommands, sysFSCommands, behaviorErr := hcm.resolveClockChainBehavior(hwConfig)
+		glog.Infof("Resolving hardware config '%s' (%d/%d)", resolvedConfig.Name, i+1, len(hwConfigs))
+
+		dpllCommands, sysFSCommands, behaviorErr := hcm.resolveClockChainBehavior(*resolvedConfig)
 		if behaviorErr != nil {
-			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", hwConfig.Name, behaviorErr)
+			return fmt.Errorf("failed to resolve clock chain behavior for hardware config %s: %w", resolvedConfig.Name, behaviorErr)
 		}
 		glog.Infof("  behavior: %d conditions with DPLL commands, %d conditions with sysfs commands", len(dpllCommands), len(sysFSCommands))
 		prepared[i].dpllPinCommands = dpllCommands
 		prepared[i].sysFSCommands = sysFSCommands
 
-		structPins, structSysfs, structErr := hcm.resolveClockChainStructure(hwConfig)
+		structPins, structSysfs, structErr := hcm.resolveClockChainStructure(*resolvedConfig)
 		if structErr != nil {
-			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", hwConfig.Name, structErr)
+			return fmt.Errorf("failed to resolve clock chain structure for hardware config %s: %w", resolvedConfig.Name, structErr)
 		}
 		glog.Infof("  structure: %d DPLL commands, %d sysfs commands", len(structPins), len(structSysfs))
 		prepared[i].structurePinCommands = structPins
 		prepared[i].structureSysFSCommands = structSysfs
 
 		// Extract holdover parameters from subsystems
-		holdoverParams := hcm.extractHoldoverParameters(hwConfig)
+		holdoverParams := hcm.extractHoldoverParameters(*resolvedConfig)
 		prepared[i].holdoverParams = holdoverParams
 		if len(holdoverParams) > 0 {
 			glog.Infof("  holdover: extracted parameters for %d DPLLs", len(holdoverParams))
@@ -325,6 +343,20 @@ func (hcm *HardwareConfigManager) UpdateHardwareConfig(hwConfigs []ptpv2alpha1.H
 
 	hcm.setHardwareConfigs(prepared)
 	return nil
+}
+
+// SetPtpConfig sets the current PtpConfig used for resolving clock chains
+// This should be called when PtpConfig is updated so that hardwareconfigs
+// with clockType can be resolved using the related ptpProfile
+func (hcm *HardwareConfigManager) SetPtpConfig(ptpConfig *ptpv1.PtpConfig) {
+	hcm.mu.Lock()
+	defer hcm.mu.Unlock()
+	hcm.ptpConfig = ptpConfig
+	if ptpConfig != nil {
+		glog.Infof("Updated PtpConfig in HardwareConfigManager (%d profiles)", len(ptpConfig.Spec.Profile))
+	} else {
+		glog.Infof("Cleared PtpConfig in HardwareConfigManager")
+	}
 }
 
 // CloneHardwareConfigs returns a deep copy of the current hardware configurations
@@ -1079,6 +1111,10 @@ func (hcm *HardwareConfigManager) applyDefaultAndInitConditions(clockChain *ptpv
 	// For each source, extract matching default/init conditions
 	for _, source := range clockChain.Behavior.Sources {
 		for _, condition := range clockChain.Behavior.Conditions {
+			// Triggers are mandatory - skip conditions without triggers
+			if len(condition.Triggers) == 0 {
+				continue
+			}
 			for _, trigger := range condition.Triggers {
 				if trigger.ConditionType == ConditionTypeDefault && trigger.SourceName == source.Name {
 					if !seenDefault[condition.Name] {
@@ -1149,6 +1185,7 @@ func (hcm *HardwareConfigManager) applyDesiredStatesInOrder(condition ptpv2alpha
 			if err != nil {
 				return fmt.Errorf("desiredState[%d] sysfs resolve failed: %w", idx, err)
 			}
+			glog.V(4).Infof("  DesiredState[%d]: resolved sysfs paths=%v", idx, paths)
 			for _, p := range paths {
 				if err = hcm.writeSysFSValue(p, desiredState.SysFS.Value); err != nil {
 					return fmt.Errorf("desiredState[%d] sysfs write failed: %w", idx, err)
@@ -1239,11 +1276,6 @@ func (hcm *HardwareConfigManager) applyDpllPinCommands(profileName, context stri
 func (hcm *HardwareConfigManager) resolveSysFSPath(sysfSDesiredState ptpv2alpha1.SysFSDesiredState, clockChain *ptpv2alpha1.ClockChain) ([]string, error) {
 	path := sysfSDesiredState.Path
 
-	// If path doesn't contain {interface} placeholder, return as-is
-	if !strings.Contains(path, "{interface}") {
-		return []string{path}, nil
-	}
-
 	// Get interface names from PTP sources
 	interfaceName, err := hcm.getInterfaceNameFromSources(sysfSDesiredState.SourceName, clockChain)
 	if err != nil {
@@ -1258,13 +1290,20 @@ func (hcm *HardwareConfigManager) resolveSysFSPath(sysfSDesiredState ptpv2alpha1
 
 	// Also resolve ptp* placeholders if present
 	if strings.Contains(resolvedPath, "ptp*") {
-		return hcm.resolveSysFSPtpDevice(resolvedPath)
+		paths, resErr := hcm.resolveSysFSPtpDevice(resolvedPath)
+		if resErr != nil {
+			glog.V(3).Infof("resolveSysFSPath: ptp* resolution failed for %s (source=%s): %v", resolvedPath, sysfSDesiredState.SourceName, resErr)
+			return nil, resErr
+		}
+		glog.V(4).Infof("resolveSysFSPath: ptp* resolution for %s -> %v", resolvedPath, paths)
+		return paths, nil
 	}
 
 	return []string{resolvedPath}, nil
 }
 
 func (hcm *HardwareConfigManager) resolveSysFSPtpDevice(interfacePath string) ([]string, error) {
+	glog.V(4).Infof("resolveSysFSPtpDevice: resolving %s", interfacePath)
 	return ptpDeviceResolver(interfacePath)
 }
 
@@ -1424,38 +1463,6 @@ func (hcm *HardwareConfigManager) ApplyConditionForProfile(nodeProfile *ptpv1.Pt
 			profileName = *enrichedConfig.Spec.Profile.Name
 		}
 
-		// Apply commands strictly in the order defined in DesiredStates for the given condition type
-		// Use cached commands when available (all conditions are cached during enrichment)
-		if enrichedConfig.Spec.Profile.ClockChain != nil && enrichedConfig.Spec.Profile.ClockChain.Behavior != nil {
-			conditions := hcm.extractConditionsByTypeAndSource(enrichedConfig.Spec.Profile.ClockChain.Behavior.Conditions, conditionType, sourceName)
-			for _, condition := range conditions {
-				// Try to use cached commands first
-				cachedSysFS, hasSysFS := enrichedConfig.sysFSCommands[condition.Name]
-				cachedDPLL, hasDPLL := enrichedConfig.dpllPinCommands[condition.Name]
-
-				if hasSysFS || hasDPLL {
-					glog.V(3).Infof("Using cached commands for condition '%s'", condition.Name)
-					// Apply cached sysfs commands first (if any)
-					if hasSysFS && len(cachedSysFS) > 0 {
-						if err := hcm.applyCachedSysFSCommands(condition.Name, profileName, cachedSysFS); err != nil {
-							return fmt.Errorf("failed to apply cached sysfs commands for condition '%s': %w", condition.Name, err)
-						}
-					}
-					// Apply cached DPLL commands (if any)
-					if hasDPLL && len(cachedDPLL) > 0 {
-						if err := hcm.applyDpllPinCommands(profileName, condition.Name, cachedDPLL); err != nil {
-							return fmt.Errorf("failed to apply cached DPLL commands for condition '%s': %w", condition.Name, err)
-						}
-					}
-				} else {
-					// Fall back to resolving on-the-fly if not cached (shouldn't happen in normal operation)
-					glog.Warningf("No cached commands found for condition '%s', resolving on-the-fly", condition.Name)
-					if err := hcm.applyDesiredStatesInOrder(condition, profileName, enrichedConfig.Spec.Profile.ClockChain); err != nil {
-						return fmt.Errorf("failed to apply condition '%s' in order: %w", condition.Name, err)
-					}
-				}
-			}
-		}
 		// Apply commands strictly in the order defined in DesiredStates for the given condition type
 		// Use cached commands when available (all conditions are cached during enrichment)
 		if enrichedConfig.Spec.Profile.ClockChain != nil && enrichedConfig.Spec.Profile.ClockChain.Behavior != nil {

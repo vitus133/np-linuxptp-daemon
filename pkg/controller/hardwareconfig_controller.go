@@ -177,8 +177,9 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 		if r.HardwareConfigHandler != nil {
 			err = r.HardwareConfigHandler.UpdateHardwareConfig(applicableConfigs)
 			if err != nil {
-				glog.Errorf("Failed to update daemon hardware configuration: %v", err)
-				return ctrl.Result{}, err
+				glog.Errorf("Failed to update daemon hardware configuration: %v (will retry after backoff)", err)
+				// Requeue after a short delay to avoid immediate retry storms
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 		}
 
@@ -190,8 +191,9 @@ func (r *HardwareConfigReconciler) reconcileAllConfigs(ctx context.Context) (ctr
 		if r.HardwareConfigHandler != nil {
 			err = r.HardwareConfigHandler.UpdateHardwareConfig([]ptpv2alpha1.HardwareConfig{})
 			if err != nil {
-				glog.Errorf("Failed to clear daemon hardware configuration: %v", err)
-				return ctrl.Result{}, err
+				glog.Errorf("Failed to clear daemon hardware configuration: %v (will retry after backoff)", err)
+				// Requeue after a short delay to avoid immediate retry storms
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 		}
 	}

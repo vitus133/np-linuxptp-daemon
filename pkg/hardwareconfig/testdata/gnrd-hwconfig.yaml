@@ -101,7 +101,9 @@ spec:
       #       embeddedSyncFrequency: 1
       #       dutyCyclePct: 25
       structure:
-      - dpll:
+      - name: leader
+        hardwareSpecificDefinitions: intel/e825
+        dpll:
           networkInterface: eno5
           holdoverParameters:
             maxInSpecOffset: 20
@@ -117,7 +119,5 @@ spec:
           - eno2
           - eno3
           - eno4
-        hardwareSpecificDefinitions: intel/e825
-        name: leader
     name: tbc
   relatedPtpProfileName: 01-tbc-tr

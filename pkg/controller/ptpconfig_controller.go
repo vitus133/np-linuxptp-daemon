@@ -128,13 +128,13 @@ func (r *PtpConfigReconciler) calculateNodeProfiles(ctx context.Context, ptpConf
 		log.Info("Processing PtpConfig", "name", ptpConfig.Name, "profiles", len(ptpConfig.Spec.Profile), "recommendations", len(ptpConfig.Spec.Recommend))
 
 		for _, recommend := range ptpConfig.Spec.Recommend {
-			if anyRuleMatchesNode(recommend.Match, r.NodeName, node.Labels) {
+			if r.doesRecommendationMatch(recommend, r.NodeName, node.Labels) {
 				priority := ptr.Deref(recommend.Priority, int64(0))
 				// Find the corresponding profile
 				if recommend.Profile != nil {
 					profileName := *recommend.Profile
 					for _, profile := range ptpConfig.Spec.Profile {
-						if *profile.Name == profileName {
+						if profile.Name != nil && *profile.Name == profileName {
 							allMatches = append(allMatches, matchedRecommendation{
 								recommend:  recommend,
 								profile:    profile,
@@ -175,14 +175,15 @@ func (r *PtpConfigReconciler) calculateNodeProfiles(ctx context.Context, ptpConf
 	return matchingProfiles, nil
 }
 
-func anyRuleMatchesNode(matchRules []ptpv1.MatchRule, nodeName string, nodeLabels map[string]string) bool {
+// doesRecommendationMatch checks if a recommendation matches the current node
+func (r *PtpConfigReconciler) doesRecommendationMatch(recommend ptpv1.PtpRecommend, nodeName string, nodeLabels map[string]string) bool {
 	// If no match rules are specified, it matches all nodes
-	if len(matchRules) == 0 {
+	if len(recommend.Match) == 0 {
 		return true
 	}
 
 	// Check each match rule - any match rule can match (OR logic)
-	for _, matchRule := range matchRules {
+	for _, matchRule := range recommend.Match {
 		// Check node name match
 		if matchRule.NodeName != nil && *matchRule.NodeName == nodeName {
 			return true
@@ -200,6 +201,7 @@ func anyRuleMatchesNode(matchRules []ptpv1.MatchRule, nodeName string, nodeLabel
 			// TODO: Add support for "key=value" format matching
 		}
 	}
+
 	return false
 }
 

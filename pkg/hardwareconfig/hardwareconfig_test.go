@@ -561,7 +561,6 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 
 			// Apply the condition's desired states in the exact defined order
 			applyErr := hcm.applyDesiredStatesInOrder(condition, profileName, clockChain)
-
 			// All conditions should apply successfully since the YAML is well-formed
 			if applyErr != nil {
 				t.Errorf("Failed to apply condition '%s' (type: %s): %v", condition.Name, conditionType, applyErr)
@@ -634,8 +633,8 @@ func TestApplyConditionDesiredStatesWithRealData(t *testing.T) {
 			if source.Name != "PTP" {
 				t.Errorf("Expected source name 'PTP', got '%s'", source.Name)
 			}
-			if source.SourceType != "ptpTimeReceiver" {
-				t.Errorf("Expected source type 'ptpTimeReceiver', got '%s'", source.SourceType)
+			if source.SourceType != ptpTimeReceiverType {
+				t.Errorf("Expected source type '%s', got '%s'", ptpTimeReceiverType, source.SourceType)
 			}
 			if len(source.PTPTimeReceivers) != 1 || source.PTPTimeReceivers[0] != "ens4f1" {
 				t.Errorf("Expected PTP time receiver 'ens4f1', got %v", source.PTPTimeReceivers)
@@ -1157,9 +1156,9 @@ func TestESyncConfigurationFromYAML(t *testing.T) {
 	hwSpec, err := LoadHardwareDefaults("intel/e810")
 	assert.NoError(t, err, "Should load hardware defaults")
 	assert.NotNil(t, hwSpec, "Hardware spec should not be nil")
-	// assert.NotNil(t, hwSpec.PinEsyncCommands, "Pin eSync commands should be defined")
-	// t.Logf("✓ Loaded hardware defaults: outputs=%d cmds, inputs=%d cmds",
-	// 	len(hwSpec.PinEsyncCommands.Outputs), len(hwSpec.PinEsyncCommands.Inputs))
+	assert.NotNil(t, hwSpec.PinEsyncCommands, "Pin eSync commands should be defined")
+	t.Logf("✓ Loaded hardware defaults: outputs=%d cmds, inputs=%d cmds",
+		len(hwSpec.PinEsyncCommands.Outputs), len(hwSpec.PinEsyncCommands.Inputs))
 
 	// Track total commands built across all subsystems
 	totalESyncCommands := 0
