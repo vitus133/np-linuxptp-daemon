@@ -274,7 +274,7 @@ func extractMetrics(messageTag string, processName string, ifaces config.IFaces,
 			}
 		}
 	} else if strings.Contains(output, " offset ") {
-		err, ifaceName, clockstate, ptpOffset, maxPtpOffset, frequencyAdjustment, delay := extractRegularMetrics(configName, processName, output, ifaces)
+		ifaceName, clockstate, ptpOffset, maxPtpOffset, frequencyAdjustment, delay, err := extractRegularMetrics(configName, processName, output, ifaces)
 		if err != nil {
 			glog.Error(err.Error())
 
@@ -371,25 +371,26 @@ func extractSummaryMetrics(configName, processName, output string) (iface string
 
 	iface = fields[1]
 
-	ptpOffset, err := strconv.ParseFloat(fields[3], 64)
-	if err != nil {
-		glog.Errorf("%s failed to parse offset from the output %s error %v", processName, fields[3], err)
+	parseErr := error(nil)
+	ptpOffset, parseErr = strconv.ParseFloat(fields[3], 64)
+	if parseErr != nil {
+		glog.Errorf("%s failed to parse offset from the output %s error %v", processName, fields[3], parseErr)
 	}
 
-	maxPtpOffset, err = strconv.ParseFloat(fields[5], 64)
-	if err != nil {
-		glog.Errorf("%s failed to parse max offset from the output %s error %v", processName, fields[5], err)
+	maxPtpOffset, parseErr = strconv.ParseFloat(fields[5], 64)
+	if parseErr != nil {
+		glog.Errorf("%s failed to parse max offset from the output %s error %v", processName, fields[5], parseErr)
 	}
 
-	frequencyAdjustment, err = strconv.ParseFloat(fields[7], 64)
-	if err != nil {
-		glog.Errorf("%s failed to parse frequency adjustment output %s error %v", processName, fields[7], err)
+	frequencyAdjustment, parseErr = strconv.ParseFloat(fields[7], 64)
+	if parseErr != nil {
+		glog.Errorf("%s failed to parse frequency adjustment output %s error %v", processName, fields[7], parseErr)
 	}
 
 	if len(fields) >= 11 {
-		delay, err = strconv.ParseFloat(fields[11], 64)
-		if err != nil {
-			glog.Errorf("%s failed to parse delay from the output %s error %v", processName, fields[11], err)
+		delay, parseErr = strconv.ParseFloat(fields[11], 64)
+		if parseErr != nil {
+			glog.Errorf("%s failed to parse delay from the output %s error %v", processName, fields[11], parseErr)
 		}
 	} else {
 		// If there is no delay from master this mean we are out of sync
@@ -399,7 +400,8 @@ func extractSummaryMetrics(configName, processName, output string) (iface string
 	return
 }
 
-func extractRegularMetrics(configName, processName, output string, ifaces config.IFaces) (err error, iface, clockState string, ptpOffset, maxPtpOffset, frequencyAdjustment, delay float64) {
+//lint:ignore ST1008 error return is last; keep signature stable with callers
+func extractRegularMetrics(configName, processName, output string, ifaces config.IFaces) (iface, clockState string, ptpOffset, maxPtpOffset, frequencyAdjustment, delay float64, err error) {
 	indx := strings.Index(output, offset)
 	if indx < 0 {
 		return
@@ -468,15 +470,15 @@ func extractRegularMetrics(configName, processName, output string, ifaces config
 		iface = masterOffsetIface.get(configName).alias
 	}
 
-	ptpOffset, e := strconv.ParseFloat(fields[3], 64)
-	if e != nil {
-		err = fmt.Errorf("%s failed to parse offset from the output %s error %v", processName, fields[1], err)
+	ptpOffset, parseErr := strconv.ParseFloat(fields[3], 64)
+	if parseErr != nil {
+		err = fmt.Errorf("%s failed to parse offset from the output %s error %v", processName, fields[1], parseErr)
 		return
 	}
 
-	maxPtpOffset, err = strconv.ParseFloat(fields[3], 64)
-	if err != nil {
-		err = fmt.Errorf("%s failed to parse max offset from the output %s error %v", processName, fields[1], err)
+	maxPtpOffset, parseErr = strconv.ParseFloat(fields[3], 64)
+	if parseErr != nil {
+		err = fmt.Errorf("%s failed to parse max offset from the output %s error %v", processName, fields[1], parseErr)
 		return
 	}
 
@@ -495,9 +497,9 @@ func extractRegularMetrics(configName, processName, output string, ifaces config
 		clockState = HOLDOVER
 	}
 
-	frequencyAdjustment, err = strconv.ParseFloat(fields[6], 64)
-	if err != nil {
-		err = fmt.Errorf("%s failed to parse frequency adjustment output %s error %v", processName, fields[6], err)
+	frequencyAdjustment, parseErr = strconv.ParseFloat(fields[6], 64)
+	if parseErr != nil {
+		err = fmt.Errorf("%s failed to parse frequency adjustment output %s error %v", processName, fields[6], parseErr)
 		return
 	}
 
@@ -505,9 +507,9 @@ func extractRegularMetrics(configName, processName, output string, ifaces config
 		// ts2phc acts as GM so no path delay
 		delay = 0
 	} else if len(fields) > 8 {
-		delay, err = strconv.ParseFloat(fields[8], 64)
-		if err != nil {
-			err = fmt.Errorf("%s failed to parse delay from the output %s error %v", processName, fields[8], err)
+		delay, parseErr = strconv.ParseFloat(fields[8], 64)
+		if parseErr != nil {
+			err = fmt.Errorf("%s failed to parse delay from the output %s error %v", processName, fields[8], parseErr)
 		}
 	} else {
 		// If there is no delay this mean we are out of sync
@@ -695,9 +697,9 @@ func addFlagsForMonitor(process string, configOpts *string, conf *Ptp4lConf, std
 			}
 
 			if !strings.Contains(*configOpts, "--summary_interval") {
-				_, exist := conf.getPtp4lConfOptionOrEmptyString(GlobalSectionName, "summary_interval")
+				_, exist := conf.GetOption(GlobalSectionName, "summary_interval")
 				if !exist {
-					conf.setPtp4lConfOption(GlobalSectionName, "summary_interval", "1", true)
+					conf.SetOption(GlobalSectionName, "summary_interval", "1", true)
 				}
 			}
 		}

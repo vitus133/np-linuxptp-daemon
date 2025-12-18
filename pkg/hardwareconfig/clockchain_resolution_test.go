@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ptpconfig"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpv2alpha1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v2alpha1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -136,7 +137,7 @@ func TestClockChainResolution(t *testing.T) {
 	}
 
 	// Extract upstream ports from ptpconfig
-	upstreamPorts := extractUpstreamPortsFromPtpProfile(ptpProfile)
+	upstreamPorts := ptpconfig.ExtractUpstreamPortsFromProfile(ptpProfile)
 	assert.NotEmpty(t, upstreamPorts, "Should find at least one upstream port")
 	if len(upstreamPorts) == 0 {
 		t.Fatal("Should find at least one upstream port")

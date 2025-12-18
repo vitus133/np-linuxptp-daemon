@@ -18,7 +18,6 @@ import (
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/config"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/daemon"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -56,7 +55,7 @@ const (
 )
 
 var pm *daemon.ProcessManager
-var registry *prometheus.Registry
+
 var logTestCases []synceLogTestCase
 
 type TestCase struct {
@@ -867,8 +866,54 @@ func TestDaemon_PopulateAndRenderPtp4lConf(t *testing.T) {
 		if tc.iface != "" {
 			conf.AddInterfaceSection(tc.iface)
 		}
-		conf.ExtendGlobalSection(tc.profileName, tc.messageTag, tc.socketPath, tc.pProcess)
+		conf.ExtendGlobalSection(tc.profileName, tc.messageTag, tc.socketPath, daemon.GPSPIPE_SERIALPORT, tc.pProcess == "ts2phc")
 		actualOutput, _ := conf.RenderPtp4lConf()
 		assert.Equal(t, tc.expectedOutput, actualOutput, fmt.Sprintf("Rendered output doesn't match expected: %s", tc.testName))
+	}
+}
+
+func TestDaemon_PopulateAndRenderPtp4lConf_ts2phc(t *testing.T) {
+	testCases := []struct {
+		testConf       string
+		expectedOutput string
+		testName       string
+		ifaces         config.IFaces
+	}{
+		{
+			testConf:       "[global]\nuse_syslog  0\nverbose 1\nlogging_level 7\nts2phc.pulsewidth 500000000\nleapfile  /usr/share/zoneinfo/leap-seconds.list\ndomainNumber 24\nuds_address /var/run/ptp4l.1.socket\n[eno5]\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n[eno16495]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n[eno16595]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n",
+			expectedOutput: "#profile: \n\n[global]\nuse_syslog 0\nverbose 1\nlogging_level 7\nts2phc.pulsewidth 500000000\nleapfile /usr/share/zoneinfo/leap-seconds.list\ndomainNumber 24\nuds_address /var/run/ptp4l.1.socket\n[eno5]\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n[eno16495]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n[eno16595]\nts2phc.extts_polarity rising\nts2phc.extts_correction 0\nts2phc.master 0\nts2phc.channel 0\nts2phc.pin_index 1\n",
+			testName:       "ts2phc interface extraction test",
+			ifaces: config.IFaces{
+				{
+					Name:     "eno5",
+					IsMaster: false,
+					Source:   event.PPS,
+					PhcId:    "",
+				},
+				{
+					Name:     "eno16495",
+					IsMaster: false,
+					Source:   event.PPS,
+					PhcId:    "",
+				},
+				{
+					Name:     "eno16595",
+					IsMaster: false,
+					Source:   event.PPS,
+					PhcId:    "",
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		conf := &daemon.Ptp4lConf{}
+		conf.PopulatePtp4lConf(&tc.testConf)
+		_, ifaces := conf.RenderPtp4lConf()
+		assert.Equal(t, len(tc.ifaces), len(ifaces), fmt.Sprintf("Ifaces length doesn't match expected: %s", tc.testName))
+		for i, iface := range tc.ifaces {
+			assert.Equal(t, iface.Name, ifaces[i].Name, fmt.Sprintf("Iface name doesn't match expected: %s", tc.testName))
+			assert.Equal(t, iface.Source, ifaces[i].Source, fmt.Sprintf("Iface source doesn't match expected: %s", tc.testName))
+			assert.Equal(t, iface.PhcId, ifaces[i].PhcId, fmt.Sprintf("Iface phcId doesn't match expected: %s", tc.testName))
+		}
 	}
 }
