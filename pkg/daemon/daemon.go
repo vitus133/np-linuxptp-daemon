@@ -123,8 +123,9 @@ func NewProcessManager() *ProcessManager {
 func NewDaemonForTests(tracker *ReadyTracker, processManager *ProcessManager) *Daemon {
 	tracker.processManager = processManager
 	return &Daemon{
-		readyTracker:   tracker,
-		processManager: processManager,
+		readyTracker:          tracker,
+		processManager:        processManager,
+		hardwareConfigManager: hardwareconfig.NewHardwareConfigManager(),
 	}
 }
 
@@ -322,18 +323,12 @@ type Daemon struct {
 // into the running daemon. The daemon forwards the update to its
 // HardwareConfigManager which resolves and caches DPLL/sysfs commands.
 func (dn *Daemon) UpdateHardwareConfig(hwConfigs []ptpv2alpha1.HardwareConfig) error {
-	if dn.hardwareConfigManager == nil {
-		return fmt.Errorf("hardware config manager not initialized")
-	}
 	return dn.hardwareConfigManager.UpdateHardwareConfig(hwConfigs)
 }
 
 // getHoldoverParameters retrieves holdover parameters from HardwareConfig for a specific clock ID
 // Returns nil if no hardware config is available or no parameters are configured for the clock
 func (dn *Daemon) getHoldoverParameters(profileName string, clockID uint64) *ptpv2alpha1.HoldoverParameters {
-	if dn.hardwareConfigManager == nil {
-		return nil
-	}
 	return dn.hardwareConfigManager.GetHoldoverParameters(profileName, clockID)
 }
 
@@ -341,7 +336,7 @@ func (dn *Daemon) getHoldoverParameters(profileName string, clockID uint64) *ptp
 // It extracts the first interface from structure[*]->dpll->networkInterface.
 // Returns an empty slice if no hardwareconfig is available or no interfaces are found.
 func (dn *Daemon) getInterfacesFromHardwareConfig(nodeProfile *ptpv1.PtpProfile) config.IFaces {
-	if dn.hardwareConfigManager == nil || nodeProfile == nil || nodeProfile.Name == nil {
+	if nodeProfile == nil || nodeProfile.Name == nil {
 		return config.IFaces{}
 	}
 
@@ -543,7 +538,7 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	// This is done after sorting and reconciliation to ensure we use the same
 	// processed profiles that will actually be applied. The NodeProfiles are already
 	// filtered to be relevant for this node by calculateNodeProfiles in the controller.
-	if dn.hardwareConfigManager != nil && len(dn.ptpUpdate.NodeProfiles) > 0 {
+	if len(dn.ptpUpdate.NodeProfiles) > 0 {
 		ptpConfig := &ptpv1.PtpConfig{
 			Spec: ptpv1.PtpConfigSpec{
 				Profile: dn.ptpUpdate.NodeProfiles,
@@ -991,8 +986,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			// For T-BC mode with hardwareconfig, derive interfaces from hardwareconfig structure
 			// instead of analyzing ts2phc configuration file
 			var interfacesToUse config.IFaces
-			if profileClockType == TBC && dn.hardwareConfigManager != nil &&
-				dn.hardwareConfigManager.ReadyHardwareConfigForProfile(*nodeProfile.Name) {
+			if profileClockType == TBC && dn.hardwareConfigManager.ReadyHardwareConfigForProfile(*nodeProfile.Name) {
 				interfacesToUse = dn.getInterfacesFromHardwareConfig(nodeProfile)
 				if len(interfacesToUse) > 0 {
 					glog.Infof("Using interfaces from hardwareconfig for T-BC profile %s: %v", *nodeProfile.Name, interfacesToUse)
@@ -1071,11 +1065,9 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 						inSyncConditionTh, inSyncConditionTimes)
 					glog.Infof("depending on %s", dpllDaemon.DependsOn())
 					// Set hardwareconfig handler if hardwareconfig manager is available
-					if dn.hardwareConfigManager != nil {
-						dpllDaemon.SetHardwareConfigHandler(func(devices []*dpllnl.DoDeviceGetReply) error {
-							return dn.hardwareConfigManager.ProcessDPLLDeviceNotifications(devices)
-						})
-					}
+					dpllDaemon.SetHardwareConfigHandler(func(devices []*dpllnl.DoDeviceGetReply) error {
+						return dn.hardwareConfigManager.ProcessDPLLDeviceNotifications(devices)
+					})
 					dpllDaemon.CmdInit()
 					dprocess.depProcess = append(dprocess.depProcess, dpllDaemon)
 				}
@@ -1163,7 +1155,7 @@ func logProcessStatus(processName string, cfgName string, status int64, c net.Co
 // This method caches expensive operations that would otherwise be repeated 16x/second
 func (p *ptpProcess) prepareTBCResources() {
 	// Cache hardwareconfig availability (expensive lookup)
-	if p.dn != nil && p.dn.hardwareConfigManager != nil {
+	if p.dn != nil {
 		vTbcHasHardwareConfig = p.dn.hardwareConfigManager.HasHardwareConfigForProfile(&p.nodeProfile)
 	}
 
@@ -1188,7 +1180,7 @@ func (p *ptpProcess) tBCTransitionCheck(output string, pm *plugin.PluginManager)
 
 // applyConditionOrFallback applies hardware config for a condition or falls back to plugin
 func (p *ptpProcess) applyConditionOrFallback(conditionType, pluginAction string, pm *plugin.PluginManager, logLine string) {
-	if p.dn != nil && p.dn.hardwareConfigManager != nil {
+	if p.dn != nil {
 		// Extract source name from log line if available
 		sourceName := ""
 		if p.tbcStateDetector != nil && logLine != "" {
@@ -1416,7 +1408,6 @@ func (p *ptpProcess) processPTPMetrics(output string) {
 		if configName == "" {
 			return
 		}
-		configName = strings.Split(configName, MessageTagSuffixSeperator)[0] // remove any suffix added to the configName
 		logEntry := synce.ParseLog(output)
 		p.ProcessSynceEvents(logEntry)
 	} else {
