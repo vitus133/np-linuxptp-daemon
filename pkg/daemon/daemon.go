@@ -63,6 +63,7 @@ const (
 	// Offset filter size is hardcoded to 64 for now. It covers 4 seconds with reporting rate 16x/second.
 	// TODO: consider making it configurable
 	offsetFilterSize = 64
+	ptpSourceName    = "PTP"
 )
 
 var (
@@ -1209,6 +1210,7 @@ func (p *ptpProcess) checkOffsetFilterAndTransition(transitionAction func()) {
 	}
 
 	p.tBCAttributes.offsetFilter.Insert(math.Abs(p.offset))
+	glog.Infof("lastReportedState: %s, lastAppliedState: %s, filterFull: %t", p.tBCAttributes.lastReportedState, p.tBCAttributes.lastAppliedState, p.tBCAttributes.offsetFilter.IsFull())
 	if p.tBCAttributes.lastReportedState == event.PTP_LOCKED &&
 		p.tBCAttributes.lastAppliedState != event.PTP_LOCKED {
 		// Require filter to be full before sending event to ensure meaningful filtering
@@ -1228,14 +1230,15 @@ func (p *ptpProcess) checkOffsetFilterAndTransition(transitionAction func()) {
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 	// Use the new DetectStateChange function for optimal performance
 	conditionType := p.tbcStateDetector.DetectStateChange(output)
-
+	glog.Infof("T-BC transition condition type: %s, output: %s", conditionType, output)
 	switch conditionType {
 	case hardwareconfig.ConditionTypeLocked:
 		// Defer transition until offset filter confirms stability
 		p.tBCAttributes.lastReportedState = event.PTP_LOCKED
+		glog.Infof("T-BC MOVE TO LOCKED (reported state)")
 		p.tBCAttributes.offsetFilter = utils.NewWindow(offsetFilterSize)
 	case hardwareconfig.ConditionTypeLost:
-		if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, hardwareconfig.ConditionTypeLost, "PTP4l"); err != nil {
+		if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, hardwareconfig.ConditionTypeLost, ptpSourceName); err != nil {
 			glog.Errorf("Failed to apply hardware config for '%s' condition: %v", hardwareconfig.ConditionTypeLost, err)
 		} else {
 			glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
@@ -1250,7 +1253,7 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 
 	// Check offset filter and transition if conditions are met
 	p.checkOffsetFilterAndTransition(func() {
-		if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, hardwareconfig.ConditionTypeLocked, "PTP4l"); err != nil {
+		if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, hardwareconfig.ConditionTypeLocked, ptpSourceName); err != nil {
 			glog.Errorf("Failed to apply hardware config for '%s' condition: %v", hardwareconfig.ConditionTypeLocked, err)
 		} else {
 			glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLocked)
