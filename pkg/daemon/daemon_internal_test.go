@@ -723,8 +723,10 @@ func TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration(t *testing
 	// Set up mock command executor for GetClockIDFromInterface
 	mockCmd := hardwareconfig.NewMockCommandExecutor()
 	mockCmd.SetResponse("ethtool", []string{"-i", "ens4f0"}, "driver: ice\nbus-info: 0000:17:00.0")
+	mockCmd.SetResponse("lspci", []string{"-s", "0000:17:00.0"}, "17:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for backplane")
 	mockCmd.SetResponse("devlink", []string{"dev", "info", "pci/0000:17:00.0"}, "serial_number 50-7c-6f-ff-ff-5c-4a-e8")
 	mockCmd.SetResponse("ethtool", []string{"-i", "ens8f0"}, "driver: ice\nbus-info: 0000:51:00.0")
+	mockCmd.SetResponse("lspci", []string{"-s", "0000:51:00.0"}, "51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for backplane")
 	mockCmd.SetResponse("devlink", []string{"dev", "info", "pci/0000:51:00.0"}, "serial_number 50-7c-6f-ff-ff-1f-b1-b8")
 	hardwareconfig.SetCommandExecutor(mockCmd)
 	defer hardwareconfig.ResetCommandExecutor()
@@ -810,8 +812,10 @@ func TestProcessTBCTransitionHardwareConfig_ProcessLogFile(t *testing.T) {
 	// Set up mock command executor for GetClockIDFromInterface
 	mockCmd := hardwareconfig.NewMockCommandExecutor()
 	mockCmd.SetResponse("ethtool", []string{"-i", "ens4f0"}, "driver: ice\nbus-info: 0000:17:00.0")
+	mockCmd.SetResponse("lspci", []string{"-s", "0000:17:00.0"}, "17:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for backplane")
 	mockCmd.SetResponse("devlink", []string{"dev", "info", "pci/0000:17:00.0"}, "serial_number 50-7c-6f-ff-ff-5c-4a-e8")
 	mockCmd.SetResponse("ethtool", []string{"-i", "ens8f0"}, "driver: ice\nbus-info: 0000:51:00.0")
+	mockCmd.SetResponse("lspci", []string{"-s", "0000:51:00.0"}, "51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for backplane")
 	mockCmd.SetResponse("devlink", []string{"dev", "info", "pci/0000:51:00.0"}, "serial_number 50-7c-6f-ff-ff-1f-b1-b8")
 	hardwareconfig.SetCommandExecutor(mockCmd)
 	defer hardwareconfig.ResetCommandExecutor()
