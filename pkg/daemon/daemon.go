@@ -1325,7 +1325,6 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 	case hardwareconfig.ConditionTypeLocked:
 		// Defer transition until offset filter confirms stability
 		p.tBCAttributes.lastReportedState = event.PTP_LOCKED
-		glog.Infof("T-BC MOVE TO LOCKED (reported state)")
 		p.tBCAttributes.offsetFilter = utils.NewWindow(offsetFilterSize)
 	case hardwareconfig.ConditionTypeLost:
 		if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(&p.nodeProfile, hardwareconfig.ConditionTypeLost); err != nil {
