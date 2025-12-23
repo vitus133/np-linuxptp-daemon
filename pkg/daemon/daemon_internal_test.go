@@ -6,12 +6,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/bigkevmcd/go-configparser"
 	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
@@ -543,10 +541,19 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 		vTbcHasHardwareConfig = true
 		defer func() { vTbcHasHardwareConfig = oldValue }()
 
-		// Create a mock Daemon with hardwareConfigManager
+		// Create a mock Daemon with hardwareConfigManager and set up hardware config
+		hcm := hardwareconfig.NewHardwareConfigManager()
+		err := setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
+		assert.NoError(t, err, "Should be able to set up hardware config")
 		mockDaemon := &Daemon{
-			hardwareConfigManager: hardwareconfig.NewHardwareConfigManager(),
+			hardwareConfigManager: hcm,
 		}
+
+		detector := hardwareconfig.NewPTPStateDetector(hcm) // Use same HCM
+
+		// Verify detector has ens4f0 in monitored ports
+		monitoredPorts := detector.GetMonitoredPorts()
+		assert.Contains(t, monitoredPorts, "ens4f0", "ens4f0 should be in monitored ports")
 
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
@@ -566,7 +573,7 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 			configName:       "test-config",
 			clockType:        event.BC,
 			offset:           5.0, // Set offset < threshold (10.0) to allow event to be sent
-			tbcStateDetector: createMockPTPStateDetectorForHardwareConfig(),
+			tbcStateDetector: detector,
 			dn:               mockDaemon,
 		}
 
@@ -615,10 +622,19 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 		vTbcHasHardwareConfig = true
 		defer func() { vTbcHasHardwareConfig = oldValue }()
 
-		// Create a mock Daemon with hardwareConfigManager
+		// Create a mock Daemon with hardwareConfigManager and set up hardware config
+		hcm := hardwareconfig.NewHardwareConfigManager()
+		err := setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
+		assert.NoError(t, err, "Should be able to set up hardware config")
 		mockDaemon := &Daemon{
-			hardwareConfigManager: hardwareconfig.NewHardwareConfigManager(),
+			hardwareConfigManager: hcm,
 		}
+
+		detector := hardwareconfig.NewPTPStateDetector(hcm) // Use same HCM
+
+		// Verify detector has ens4f0 in monitored ports
+		monitoredPorts := detector.GetMonitoredPorts()
+		assert.Contains(t, monitoredPorts, "ens4f0", "ens4f0 should be in monitored ports")
 
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
@@ -634,7 +650,7 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 			eventCh:          make(chan event.EventChannel, 1),
 			configName:       "test-config",
 			clockType:        event.BC,
-			tbcStateDetector: createMockPTPStateDetectorForHardwareConfig(),
+			tbcStateDetector: detector,
 			dn:               mockDaemon,
 		}
 
@@ -848,24 +864,14 @@ func setupHardwareConfigForTest(hcm *hardwareconfig.HardwareConfigManager, profi
 }
 
 // createMockPTPStateDetectorForHardwareConfig creates a mock PTPStateDetector for hardware config testing
-// Uses NewPTPStateDetector to properly initialize the detector, then adds test-specific monitored ports
+// Creates a hardware config with a PTP source that monitors ens4f0, then initializes the detector
 func createMockPTPStateDetectorForHardwareConfig() *hardwareconfig.PTPStateDetector {
 	// Create a detector using the normal constructor - this properly initializes ptp4lExtractor
 	hcm := hardwareconfig.NewHardwareConfigManager()
-	psd := hardwareconfig.NewPTPStateDetector(hcm)
+	_ = setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
 
-	// Add test-specific monitored ports using unsafe reflection to access the unexported map
-	// Since maps are reference types, we can modify it in place once we have access
-	psdValue := reflect.ValueOf(psd).Elem()
-	monitoredPortsField := psdValue.FieldByName("monitoredPorts")
-	if monitoredPortsField.IsValid() {
-		// Use unsafe to get a pointer to the map, then dereference to modify it
-		monitoredPortsPtr := reflect.NewAt(monitoredPortsField.Type(), unsafe.Pointer(monitoredPortsField.UnsafeAddr())).Elem()
-		monitoredPorts := monitoredPortsPtr.Interface().(map[string]bool)
-		monitoredPorts["ens4f0"] = true // Add ens4f0 to monitored ports for testing
-	}
-
-	return psd
+	// Create detector - it will automatically populate monitoredPorts from the hardware config
+	return hardwareconfig.NewPTPStateDetector(hcm)
 }
 
 // TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration tests integration with real hardware config
