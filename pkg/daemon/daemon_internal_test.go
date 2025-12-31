@@ -21,7 +21,6 @@ import (
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpv2alpha1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v2alpha1"
 	"github.com/stretchr/testify/assert"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -801,50 +800,6 @@ func TestTBCTransitionCheck_PathSelection(t *testing.T) {
 			}
 		})
 	}
-}
-
-// setupHardwareConfigForTest sets up a hardware config with a PTP source monitoring the given port
-func setupHardwareConfigForTest(hcm *hardwareconfig.HardwareConfigManager, profileName, portName string) error {
-	// Mock GetDpllPins to return an empty pin cache (no pins needed for this test)
-	hardwareconfig.SetDpllPinsGetter(hardwareconfig.CreateMockDpllPinsGetter(nil, nil))
-	defer hardwareconfig.ResetDpllPinsGetter()
-
-	// Create a minimal hardware config with a PTP source monitoring the specified port
-	hwConfig := ptpv2alpha1.HardwareConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-hwconfig",
-		},
-		Spec: ptpv2alpha1.HardwareConfigSpec{
-			RelatedPtpProfileName: profileName,
-			Profile: ptpv2alpha1.HardwareProfile{
-				ClockChain: &ptpv2alpha1.ClockChain{
-					Behavior: &ptpv2alpha1.Behavior{
-						Sources: []ptpv2alpha1.SourceConfig{
-							{
-								Name:             "PTP4l",
-								SourceType:       "ptpTimeReceiver",
-								PTPTimeReceivers: []string{portName},
-								Subsystem:        "test-subsystem",
-							},
-						},
-					},
-					Structure: []ptpv2alpha1.Subsystem{
-						{
-							Name: "test-subsystem",
-							Ethernet: []ptpv2alpha1.Ethernet{
-								{
-									Ports: []string{portName},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Update hardware config manager with the test config
-	return hcm.UpdateHardwareConfig([]ptpv2alpha1.HardwareConfig{hwConfig})
 }
 
 // createMockPTPStateDetectorForHardwareConfig creates a mock PTPStateDetector for hardware config testing
