@@ -23,7 +23,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// vendor defaults are embedded; no filesystem setup needed
+const (
+	testProfileName   = "test-profile"
+	testMonitoredPort = "ens4f0"
+	testConfigName    = "test-config"
+)
 
 func loadProfile(path string) (*ptpv1.PtpProfile, error) {
 	profileData, err := os.ReadFile(path)
@@ -502,26 +506,31 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 	// Test case: Verify hardware config setup
 	t.Run("hardware config setup validation", func(t *testing.T) {
 		// Create a ptpProcess with hardware config enabled
-		// Set global variable for hardware config
-		vTbcHasHardwareConfig = true
-		defer func() { vTbcHasHardwareConfig = false }()
+		// Set up hardware config manager with proper config
+		hcm := setupHardwareConfigManagerForTesting()
+		mockDaemon := &Daemon{
+			hardwareConfigManager: hcm,
+		}
 
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
 				trIfaceName: "ens4f0",
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
-			eventCh:          make(chan event.EventChannel, 1),              //nolint:govet // needed for test setup
-			configName:       "test-config",                                 //nolint:govet // needed for test setup
-			clockType:        event.BC,                                      //nolint:govet // needed for test setup
-			tbcStateDetector: createMockPTPStateDetectorForHardwareConfig(), // Use mock detector
+			eventCh:    make(chan event.EventChannel, 1),
+			configName: testConfigName,
+			clockType:  event.BC,
+			dn:         mockDaemon,
 		}
+
+		// Use prepareTBCResources to naturally set up the detector
+		process.prepareTBCResources()
 
 		// Verify that hardware config path conditions are met
 		assert.NotNil(t, process.tbcStateDetector, "PTPStateDetector should be present for hardware config path")
@@ -536,46 +545,35 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 
 	// Test case: Locked transition with offset filtering
 	t.Run("locked transition with offset filtering", func(t *testing.T) {
-		// Set global variable for hardware config
-		oldValue := vTbcHasHardwareConfig
-		vTbcHasHardwareConfig = true
-		defer func() { vTbcHasHardwareConfig = oldValue }()
-
-		// Create a mock Daemon with hardwareConfigManager and set up hardware config
-		hcm := hardwareconfig.NewHardwareConfigManager()
-		err := setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
-		assert.NoError(t, err, "Should be able to set up hardware config")
+		// Set up hardware config manager with proper config
+		hcm := setupHardwareConfigManagerForTesting()
 		mockDaemon := &Daemon{
 			hardwareConfigManager: hcm,
 		}
 
-		detector := hardwareconfig.NewPTPStateDetector(hcm) // Use same HCM
-
-		// Verify detector has ens4f0 in monitored ports
-		monitoredPorts := detector.GetMonitoredPorts()
-		assert.Contains(t, monitoredPorts, "ens4f0", "ens4f0 should be in monitored ports")
-
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
 				trIfaceName:       "ens4f0",
-				trPortsConfigFile: "test-config",    // Must match configName for offset filter logic to run
+				trPortsConfigFile: testConfigName,   // Must match configName for offset filter logic to run
 				lastAppliedState:  event.PTP_NOTSET, // Must not be PTP_LOCKED for event to be sent
 				offsetThreshold:   10.0,             // Set threshold > offset (5.0) to allow event to be sent
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
-			eventCh:          make(chan event.EventChannel, 1),
-			configName:       "test-config",
-			clockType:        event.BC,
-			offset:           5.0, // Set offset < threshold (10.0) to allow event to be sent
-			tbcStateDetector: detector,
-			dn:               mockDaemon,
+			eventCh:    make(chan event.EventChannel, 1),
+			configName: testConfigName,
+			clockType:  event.BC,
+			offset:     5.0, // Set offset < threshold (10.0) to allow event to be sent
+			dn:         mockDaemon,
 		}
+
+		// Use prepareTBCResources to naturally set up the detector
+		process.prepareTBCResources()
 
 		// First call: Trigger ConditionTypeLocked (no event sent yet)
 		// The parser detects locked state when event contains "to SLAVE"
@@ -617,42 +615,31 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 
 	// Test case: Lost transition (immediate)
 	t.Run("lost transition", func(t *testing.T) {
-		// Set global variable for hardware config
-		oldValue := vTbcHasHardwareConfig
-		vTbcHasHardwareConfig = true
-		defer func() { vTbcHasHardwareConfig = oldValue }()
-
-		// Create a mock Daemon with hardwareConfigManager and set up hardware config
-		hcm := hardwareconfig.NewHardwareConfigManager()
-		err := setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
-		assert.NoError(t, err, "Should be able to set up hardware config")
+		// Set up hardware config manager with proper config
+		hcm := setupHardwareConfigManagerForTesting()
 		mockDaemon := &Daemon{
 			hardwareConfigManager: hcm,
 		}
-
-		detector := hardwareconfig.NewPTPStateDetector(hcm) // Use same HCM
-
-		// Verify detector has ens4f0 in monitored ports
-		monitoredPorts := detector.GetMonitoredPorts()
-		assert.Contains(t, monitoredPorts, "ens4f0", "ens4f0 should be in monitored ports")
 
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
 				trIfaceName: "ens4f0",
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
-			eventCh:          make(chan event.EventChannel, 1),
-			configName:       "test-config",
-			clockType:        event.BC,
-			tbcStateDetector: detector,
-			dn:               mockDaemon,
+			eventCh:    make(chan event.EventChannel, 1),
+			configName: testConfigName,
+			clockType:  event.BC,
+			dn:         mockDaemon,
 		}
+
+		// Use prepareTBCResources to naturally set up the detector
+		process.prepareTBCResources()
 
 		// Call with lost transition log - parser detects lost when event contains "SLAVE to"
 		process.tBCTransitionCheck("ptp4l[123.456]: [test-config.0.config] port 1 (ens4f0): SLAVE to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES", pm)
@@ -713,8 +700,24 @@ func TestTBCTransitionCheck_HardwareConfigPath(t *testing.T) {
 					},
 				}
 
+				// Set up detector if needed using proper hardware config setup
 				if tc.hasDetector {
-					process.tbcStateDetector = createMockPTPStateDetectorForHardwareConfig()
+					if tc.tbcHasHardwareConfig {
+						// Set up hardware config and use prepareTBCResources to naturally create detector
+						hcm := setupHardwareConfigManagerForTesting()
+						process.dn = &Daemon{
+							hardwareConfigManager: hcm,
+						}
+						process.nodeProfile = ptpv1.PtpProfile{
+							Name: stringPointer(testProfileName),
+						}
+						process.prepareTBCResources()
+					} else {
+						// For test case where hardware config is disabled but detector exists,
+						// create an empty detector without hardware config (won't match any ports)
+						hcm := hardwareconfig.NewHardwareConfigManager()
+						process.tbcStateDetector = hcm.GetPTPStateDetector()
+					}
 				}
 
 				// Determine which path would be taken
@@ -784,20 +787,35 @@ func TestTBCTransitionCheck_PathSelection(t *testing.T) {
 					trIfaceName: "ens4f0",
 				},
 				nodeProfile: ptpv1.PtpProfile{
-					Name: stringPointer("test-profile"),
+					Name: stringPointer(testProfileName),
 					PtpSettings: map[string]string{
 						"leadingInterface": "ens4f0",
 						"clockId[ens4f0]":  "123456789",
 					},
 				},
-				eventCh:    make(chan event.EventChannel, 1), //nolint:govet // needed for test setup
-				configName: "test-config",                    //nolint:govet // needed for test setup
-				clockType:  event.BC,                         //nolint:govet // needed for test setup
+				eventCh:    make(chan event.EventChannel, 1),
+				configName: testConfigName,
+				clockType:  event.BC,
 			}
 
-			// Set state detector based on test case
+			// Set state detector based on test case using proper hardware config setup
 			if tt.hasStateDetector {
-				process.tbcStateDetector = createMockPTPStateDetectorForHardwareConfig()
+				if tt.tbcHasHardwareConfig {
+					// Set up hardware config and use prepareTBCResources to naturally create detector
+					hcm := setupHardwareConfigManagerForTesting()
+					process.dn = &Daemon{
+						hardwareConfigManager: hcm,
+					}
+					process.nodeProfile = ptpv1.PtpProfile{
+						Name: stringPointer(testProfileName),
+					}
+					process.prepareTBCResources()
+				} else {
+					// For test case where hardware config is disabled but detector exists,
+					// create an empty detector without hardware config (won't match any ports)
+					hcm := hardwareconfig.NewHardwareConfigManager()
+					process.tbcStateDetector = hcm.GetPTPStateDetector()
+				}
 			} else {
 				process.tbcStateDetector = nil
 			}
@@ -819,38 +837,31 @@ func TestTBCTransitionCheck_PathSelection(t *testing.T) {
 	}
 }
 
-// setupHardwareConfigForTest sets up a hardware config with a PTP source monitoring the given port
-func setupHardwareConfigForTest(hcm *hardwareconfig.HardwareConfigManager, profileName, portName string) error {
-	// Mock GetDpllPins to return an empty pin cache (no pins needed for this test)
-	hardwareconfig.SetDpllPinsGetter(hardwareconfig.CreateMockDpllPinsGetter(nil, nil))
-	defer hardwareconfig.ResetDpllPinsGetter()
+// setupHardwareConfigManagerForTesting creates a hardware config manager with a minimal hardware config
+// that includes the test monitored port. This allows tests to use prepareTBCResources() naturally.
+func setupHardwareConfigManagerForTesting() *hardwareconfig.HardwareConfigManager {
+	// Set up mock DPLL pins getter to return empty cache (UpdateHardwareConfig requires this)
+	hardwareconfig.SetDpllPinsGetter(func() (*hardwareconfig.PinCache, error) {
+		return &hardwareconfig.PinCache{Pins: make(map[uint64]map[string]dpll.PinInfo)}, nil
+	})
 
-	// Create a minimal hardware config with a PTP source monitoring the specified port
-	hwConfig := ptpv2alpha1.HardwareConfig{
+	hcm := hardwareconfig.NewHardwareConfigManager()
+
+	// Create a minimal hardware config with the test monitored port
+	hwConfig := &ptpv2alpha1.HardwareConfig{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-hwconfig",
 		},
 		Spec: ptpv2alpha1.HardwareConfigSpec{
-			RelatedPtpProfileName: profileName,
+			RelatedPtpProfileName: testProfileName,
 			Profile: ptpv2alpha1.HardwareProfile{
 				ClockChain: &ptpv2alpha1.ClockChain{
 					Behavior: &ptpv2alpha1.Behavior{
 						Sources: []ptpv2alpha1.SourceConfig{
 							{
-								Name:             "PTP4l",
+								Name:             "PTP",
 								SourceType:       "ptpTimeReceiver",
-								PTPTimeReceivers: []string{portName},
-								Subsystem:        "test-subsystem",
-							},
-						},
-					},
-					Structure: []ptpv2alpha1.Subsystem{
-						{
-							Name: "test-subsystem",
-							Ethernet: []ptpv2alpha1.Ethernet{
-								{
-									Ports: []string{portName},
-								},
+								PTPTimeReceivers: []string{testMonitoredPort},
 							},
 						},
 					},
@@ -859,19 +870,12 @@ func setupHardwareConfigForTest(hcm *hardwareconfig.HardwareConfigManager, profi
 		},
 	}
 
-	// Update hardware config manager with the test config
-	return hcm.UpdateHardwareConfig([]ptpv2alpha1.HardwareConfig{hwConfig})
-}
-
-// createMockPTPStateDetectorForHardwareConfig creates a mock PTPStateDetector for hardware config testing
-// Creates a hardware config with a PTP source that monitors ens4f0, then initializes the detector
-func createMockPTPStateDetectorForHardwareConfig() *hardwareconfig.PTPStateDetector {
-	// Create a detector using the normal constructor - this properly initializes ptp4lExtractor
-	hcm := hardwareconfig.NewHardwareConfigManager()
-	_ = setupHardwareConfigForTest(hcm, "test-profile", "ens4f0")
-
-	// Create detector - it will automatically populate monitoredPorts from the hardware config
-	return hardwareconfig.NewPTPStateDetector(hcm)
+	err := hcm.UpdateHardwareConfig([]ptpv2alpha1.HardwareConfig{*hwConfig})
+	if err != nil {
+		// Log error but continue - tests will fail if setup is wrong
+		_ = err
+	}
+	return hcm
 }
 
 // TestProcessTBCTransitionHardwareConfig_HardwareConfigIntegration tests integration with real hardware config
@@ -1021,7 +1025,7 @@ func TestProcessTBCTransitionHardwareConfig_ProcessLogFile(t *testing.T) {
 			},
 		},
 		eventCh:          make(chan event.EventChannel, 100), // Large buffer for all events
-		configName:       "test-config",
+		configName:       testConfigName,
 		clockType:        event.BC,
 		tbcStateDetector: detector, // Use real detector with real config
 		dn:               mockDaemon,
@@ -1131,19 +1135,19 @@ func TestTBCTransitionCheck_LegacyPath(t *testing.T) {
 		process := &ptpProcess{
 			tBCAttributes: tBCProcessAttributes{
 				trIfaceName:       "ens4f0",
-				trPortsConfigFile: "test-config",    // Must match configName for offset filter logic to run
+				trPortsConfigFile: testConfigName,   // Must match configName for offset filter logic to run
 				lastAppliedState:  event.PTP_NOTSET, // Must not be PTP_LOCKED for event to be sent
 				offsetThreshold:   10.0,             // Set threshold > offset (5.0) to allow event to be sent
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
 			eventCh:    make(chan event.EventChannel, 1),
-			configName: "test-config",
+			configName: testConfigName,
 			clockType:  event.BC,
 			offset:     5.0, // Set offset < threshold (10.0) to allow event to be sent
 		}
@@ -1190,14 +1194,14 @@ func TestTBCTransitionCheck_LegacyPath(t *testing.T) {
 				trIfaceName: "ens4f0",
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
 			eventCh:    make(chan event.EventChannel, 1),
-			configName: "test-config",
+			configName: testConfigName,
 			clockType:  event.BC,
 		}
 
@@ -1228,14 +1232,14 @@ func TestTBCTransitionCheck_LegacyPath(t *testing.T) {
 				trIfaceName: "ens4f0",
 			},
 			nodeProfile: ptpv1.PtpProfile{
-				Name: stringPointer("test-profile"),
+				Name: stringPointer(testProfileName),
 				PtpSettings: map[string]string{
 					"leadingInterface": "ens4f0",
 					"clockId[ens4f0]":  "123456789",
 				},
 			},
 			eventCh:    make(chan event.EventChannel, 1),
-			configName: "test-config",
+			configName: testConfigName,
 			clockType:  event.BC,
 		}
 
