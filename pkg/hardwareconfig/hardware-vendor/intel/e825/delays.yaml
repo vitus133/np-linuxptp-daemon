@@ -45,22 +45,22 @@ connections:
     #   FSRead:
     #     path: "/sys/class/net/{interface}/device/ptp/ptp*/delay/nac_to_timing_module"
     # Pre-coded fallback default for when platform doesn't provide it
-    delayPs: 2500
+    delayPs: 0
   # DPLL to NAC (during holdover)
   - from: "DPLL 1kHz phase output"
     to: "NAC0 PTP phase input"
     description: "Routing delay from DPLL 1kHz phase output to NAC0 PTP phase input"
-    delayPs: 2500
+    delayPs: -7500
   # Timing module internal routing from DPLL output pin to connector output pin
   # We skip the MUX delay and factor everything in
   - from: "DPLL ePPS output 1"
     to: "CF1 ePPS input"
     description: "Internal routing delay from DPLL output 1 to CF1 input"
-    delayPs: 2500
+    delayPs: 0
   - from: "DPLL ePPS output 2"
     to: "CF2 ePPS input"
     description: "Internal routing delay from DPLL output 2 to CF2 input"
-    delayPs: 2500
+    delayPs: 0
   
 
 
