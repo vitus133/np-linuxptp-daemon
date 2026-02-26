@@ -214,6 +214,14 @@ func (e *EventHandler) setConn(c net.Conn) {
 	}
 }
 
+// ProcessDownInfo carries process downtime information through the event channel.
+// Phase 1 (Exceeded=false): process just went down, within permitted time.
+// Phase 2 (Exceeded=true): cumulative downtime crossed the threshold.
+type ProcessDownInfo struct {
+	Exceeded           bool
+	CumulativeDowntime time.Duration
+}
+
 // EventChannel .. event channel to subscriber to events
 type EventChannel struct {
 	ProcessName        EventSource               // ptp4l, gnss etc
@@ -227,7 +235,8 @@ type EventChannel struct {
 	WriteToLog         bool                      // send to log in predefined format %s[%d]:[%s] %s %d
 	Reset              bool                      // reset data on ptp deletes or process died
 	SourceLost         bool
-	FrequencyTraceable bool // will be tru if synce is traceable
+	FrequencyTraceable bool             // will be tru if synce is traceable
+	ProcessDown        *ProcessDownInfo // non-nil when this is a process downtime event
 }
 
 var (
@@ -880,6 +889,7 @@ func (e *EventHandler) ProcessEvents() {
 				}
 				continue
 			}
+
 			var logOut []string
 			logDataValues := ""
 			if event.ProcessName == SYNCE {

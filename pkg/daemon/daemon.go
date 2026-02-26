@@ -125,6 +125,7 @@ type ProcessManager struct {
 	process         []*ptpProcess
 	eventChannel    chan event.EventChannel
 	ptpEventHandler *event.EventHandler
+	downtimeTracker *ProcessDowntimeTracker
 }
 
 // NewProcessManager is used by unit tests
@@ -433,6 +434,7 @@ func New(
 		process:         nil,
 		eventChannel:    eventChannel,
 		ptpEventHandler: event.Init(nodeName, stdoutToSocket, eventSocket, eventChannel, closeManager, Offset, ClockState, ClockClassMetrics),
+		downtimeTracker: NewProcessDowntimeTracker(),
 	}
 	tracker.processManager = pm
 
@@ -999,6 +1001,14 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			dn:      dn,
 		}
 
+		if clockType == event.BC {
+			var pdt *ptpv1.ProcessDowntimeThresholds
+			if dprocess.ptpClockThreshold != nil {
+				pdt = dprocess.ptpClockThreshold.ProcessDowntimeThresholds
+			}
+			dn.processManager.downtimeTracker.Register(pProcess, configFile, pdt, dn.processManager.eventChannel)
+		}
+
 		if pProcess == ptp4lProcessName {
 			if port, ok := (*nodeProfile).PtpSettings["upstreamPort"]; ok && clockType == event.BC {
 				dprocess.tBCAttributes.trIfaceName = port
@@ -1411,6 +1421,10 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *plugin.PluginManager) {
 		profileClockType = string(event.ClockUnset)
 	}
 	for {
+		if profileClockType == TBC && p.dn != nil {
+			p.dn.processManager.downtimeTracker.OnProcessUp(p.name, p.configName)
+		}
+
 		glog.Infof("Starting %s...", p.name)
 		glog.Infof("%s cmd: %+v", p.name, cmd)
 
@@ -1517,6 +1531,9 @@ func (p *ptpProcess) cmdRun(stdoutToSocket bool, pm *plugin.PluginManager) {
 			} else {
 				processStatus(nil, p.name, p.messageTag, PtpProcessDown)
 			}
+			if profileClockType == TBC && p.dn != nil {
+				p.dn.processManager.downtimeTracker.OnProcessDown(p.name, p.configName)
+			}
 			p.updateGMStatusOnProcessDown(p.name)
 		}
 
@@ -1584,6 +1601,9 @@ func (p *ptpProcess) processPTPMetrics(output string) {
 // cmdStop stops ptpProcess launched by cmdRun
 func (p *ptpProcess) cmdStop() {
 	glog.Infof("stopping %s...", p.name)
+	if p.dn != nil {
+		p.dn.processManager.downtimeTracker.Reset(p.name, p.configName)
+	}
 	cmd := p.cmd
 	if cmd == nil {
 		glog.Infof("cmdStop is nil %s", p.name)
@@ -1639,17 +1659,21 @@ func (p *ptpProcess) cmdSetEnabled(enabled bool) {
 
 func getPTPThreshold(nodeProfile *ptpv1.PtpProfile) *ptpv1.PtpClockThreshold {
 	if nodeProfile.PtpClockThreshold != nil {
-		return &ptpv1.PtpClockThreshold{
+		result := &ptpv1.PtpClockThreshold{
 			HoldOverTimeout:    nodeProfile.PtpClockThreshold.HoldOverTimeout,
 			MaxOffsetThreshold: nodeProfile.PtpClockThreshold.MaxOffsetThreshold,
 			MinOffsetThreshold: nodeProfile.PtpClockThreshold.MinOffsetThreshold,
 		}
-	} else {
-		return &ptpv1.PtpClockThreshold{
-			HoldOverTimeout:    5,
-			MaxOffsetThreshold: 100,
-			MinOffsetThreshold: -100,
+		if nodeProfile.PtpClockThreshold.ProcessDowntimeThresholds != nil {
+			pdt := *nodeProfile.PtpClockThreshold.ProcessDowntimeThresholds
+			result.ProcessDowntimeThresholds = &pdt
 		}
+		return result
+	}
+	return &ptpv1.PtpClockThreshold{
+		HoldOverTimeout:    5,
+		MaxOffsetThreshold: 100,
+		MinOffsetThreshold: -100,
 	}
 }
 

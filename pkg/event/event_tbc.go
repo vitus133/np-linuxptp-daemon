@@ -87,6 +87,11 @@ func (e *EventHandler) updateBCState(event EventChannel) (clockSyncState, bool) 
 	// For External GM data announces in the locked state, update whenever any of the
 	// information elements change
 	updateDownstreamData := false
+	if event.ProcessDown != nil {
+		glog.Infof("process downtime event: %s/%s exceeded=%v cumulative=%v",
+			event.ProcessName, event.CfgName, event.ProcessDown.Exceeded,
+			event.ProcessDown.CumulativeDowntime)
+	}
 	if event.ProcessName == PTP4lProcessName {
 		glog.Infof("PTP4l event: %+v", event)
 	}
