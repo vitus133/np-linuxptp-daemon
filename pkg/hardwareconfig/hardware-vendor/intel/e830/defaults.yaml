@@ -6,3 +6,11 @@
 # "direct" - use serial number bytes directly (keeps ff-ff in middle)
 clockIdTransformation:
   method: direct
+
+# DPLL monitoring flags intrinsic to this hardware.
+# E830 CF DPLL only provides phase status (PPS lock/unlock).
+# Phase offset and frequency status are not available.
+dpllFlags:
+  - noPhaseOffset
+  - noFrequencyStatus
+  - noPhaseStatus
