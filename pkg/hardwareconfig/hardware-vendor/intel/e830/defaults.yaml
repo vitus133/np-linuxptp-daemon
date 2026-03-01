@@ -1,0 +1,8 @@
+# E830 (Carter Flats) - Unmanaged DPLL
+# This DPLL only reports device status via unsolicited notifications.
+# No pins are reported, so no phase offset or frequency status is available.
+
+# Clock ID transformation method for this hardware
+# "direct" - use serial number bytes directly (keeps ff-ff in middle)
+clockIdTransformation:
+  method: direct
