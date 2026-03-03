@@ -9,7 +9,7 @@ spec:
     clockChain:
       structure:
       - name: leader
-        hardwareSpecificDefinitions: intel/e825
+        hardwareSpecificDefinitions: dell/XR8720t
         dpll:
           holdoverParameters:
             maxInSpecOffset: 20
@@ -18,10 +18,10 @@ spec:
       - name: cf1
         hardwareSpecificDefinitions: intel/e830
         dpll:
-          networkInterface: eno16595
+          networkInterface: enp108s0f0
       - name: cf2
         hardwareSpecificDefinitions: intel/e830
         dpll:
-          networkInterface: eno16495
+          networkInterface: enp109s0f0
 
   relatedPtpProfileName: 01-tbc-tr
