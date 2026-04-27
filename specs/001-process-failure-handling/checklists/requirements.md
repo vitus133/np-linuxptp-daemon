@@ -2,7 +2,7 @@
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-04-18
-**Last Validated**: 2026-04-27 (iteration 4 — FR-009 / FR-013 / FR-017 alignment)
+**Last Validated**: 2026-04-27 (iteration 5 — FR-018 profile reconfiguration)
 **Feature**: [spec.md](../spec.md)
 
 **Legend**:
@@ -20,7 +20,7 @@
 ## Requirement Completeness
 
 - ✅ No [NEEDS CLARIFICATION] markers remain
-- ✅ Requirements are testable and unambiguous — FR-009 vs FR-013 contradiction resolved; FR-017 adds explicit threshold gating for state/class/events
+- ✅ Requirements are testable and unambiguous — FR-009 vs FR-013 resolved; FR-017 threshold gating; FR-018 formalizes profile reconfiguration non-duplication (SC-009)
 - ✅ Success criteria are measurable
 - ✅ Success criteria are technology-agnostic (no implementation details)
 - ⚠️ All acceptance scenarios are defined — FR-015 (gpspipe restart) and FR-016 (PTP_PROCESS_STATUS) lack dedicated scenarios; validated indirectly by SC-006 and SC-008
@@ -36,6 +36,12 @@
 - ✅ No implementation details leak into specification
 
 ## Validation History
+
+### Iteration 5 (2026-04-27)
+
+| # | Severity | Issue | Resolution |
+|---|----------|-------|------------|
+| 1 | MEDIUM | Profile reconfiguration non-duplication was informal edge-case prose (“must NOT be duplicated!!!”) | Promoted to **FR-018**; edge case shortened with cross-ref; **SC-009** for verification |
 
 ### Iteration 4 (2026-04-27)
 

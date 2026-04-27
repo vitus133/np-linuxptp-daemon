@@ -262,8 +262,12 @@ announcements per the acceptance scenarios.
 - What happens when ts2phc dependency processes (gpsd, gpspipe, DPLL) fail
   but ts2phc itself remains running?
   The system MUST handle each failure individually and emit the appropriate state-change events.
-- What happens when a process is killed during a profile reconfiguration?
-  If the system is not in the LOCKED state, the processes must be restarted with the same logic as they are today. The events must NOT be duplicated!!! For example, during the profile reconfiguration all processes are restarted by the application and the events indicating FREERUNNING state are already sent. They should not be sent again if one of the programs fails to start successfully.
+- What happens when a process is killed or fails to start during profile
+  reconfiguration?
+  If the system is not in LOCKED when reconfiguration begins, managed
+  processes MUST be restarted using the same rules as today. **Duplicate**
+  timing announcements for the same logical condition MUST NOT occur: see
+  **FR-018** (and **SC-009**).
 - How does the system handle gpspipe when the named pipe cannot be created?
   Currently, pipe creation failure either terminates the entire daemon
   (production) or leaves gpspipe permanently dead until a full profile
@@ -382,6 +386,22 @@ announcements per the acceptance scenarios.
   in T-BC / T-TSC) are not delayed by a downtime threshold. FR-016 is
   unchanged: process down/up visibility is always emitted.
 
+- **FR-018**: During **profile reconfiguration** (coordinated restart of
+  managed processes), when clock timing state and the corresponding
+  announcements for that sequence have **already** been emitted (for
+  example FREERUN while processes restart), the daemon MUST NOT emit a
+  **second** equivalent clock-state transition, clock-class announcement,
+  or duplicate of the same category of synchronization / GM-status events
+  solely because a managed process later fails to start or dies within
+  that reconfiguration window. Operators and monitoring consumers MUST see
+  at most one logical transition per distinct timing condition. FR-016
+  remains: `PTP_PROCESS_STATUS` (down/up) for the failing process MAY
+  still be emitted where applicable; this requirement targets **duplicate
+  timing-state and class signaling**, not process-level status. If the
+  system is not in LOCKED when reconfiguration begins, process restart
+  behavior MUST match today’s logic; FR-018 adds the non-duplication
+  obligation on top.
+
 ### Key Entities
 
 - **Process**: A managed child process (ptp4l, phc2sys, ts2phc, synce4l,
@@ -429,6 +449,12 @@ announcements per the acceptance scenarios.
 - **SC-008**: The system handles 10 consecutive process crash/restart
   cycles without entering a degraded state (no stuck holdover, no
   resource leaks, no stale monitoring).
+
+- **SC-009**: During profile reconfiguration, after FREERUN (or
+  equivalent) timing state and matching announcements have already been
+  issued for the coordinated restart, a managed process failing to start
+  produces **no duplicate** equivalent clock-state or clock-class
+  announcements in 100% of observed test runs (FR-018).
 
 ## Assumptions
 
