@@ -2,7 +2,7 @@
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-04-18
-**Last Validated**: 2026-04-18 (iteration 3 — post spec cleanup)
+**Last Validated**: 2026-04-27 (iteration 4 — FR-009 / FR-013 / FR-017 alignment)
 **Feature**: [spec.md](../spec.md)
 
 **Legend**:
@@ -20,7 +20,7 @@
 ## Requirement Completeness
 
 - ✅ No [NEEDS CLARIFICATION] markers remain
-- ⚠️ Requirements are testable and unambiguous — vague FRs fixed (FR-011, FR-012); full verification at plan/implementation stage
+- ✅ Requirements are testable and unambiguous — FR-009 vs FR-013 contradiction resolved; FR-017 adds explicit threshold gating for state/class/events
 - ✅ Success criteria are measurable
 - ✅ Success criteria are technology-agnostic (no implementation details)
 - ⚠️ All acceptance scenarios are defined — FR-015 (gpspipe restart) and FR-016 (PTP_PROCESS_STATUS) lack dedicated scenarios; validated indirectly by SC-006 and SC-008
@@ -36,6 +36,14 @@
 - ✅ No implementation details leak into specification
 
 ## Validation History
+
+### Iteration 4 (2026-04-27)
+
+| # | Severity | Issue | Resolution |
+|---|----------|-------|--------------|
+| 1 | HIGH | FR-013 implied class 7 for any T-GM process outage; conflicted with FR-009 / Q4 (ts2phc → FREERUN + class 248 past threshold) | FR-013 split into holdover-capable (e.g. gpsd/gpspipe while ts2phc runs) vs holdover-breaking (ts2phc past threshold, TT ptp4l); explicit “not 7” when FREERUN |
+| 2 | MEDIUM | FR-009 did not spell out pre-threshold inhibition of FREERUN / class downgrade | FR-009 expanded with MUST NOT transition/announce until threshold; cross-ref FR-017 |
+| 3 | MEDIUM | Threshold suppressed “events” but state/class timing vs threshold was implicit | FR-017: no clock state, PMC class, or suppressed sync/GM-status changes solely from that outage until threshold; FR-006 exception; FR-016 unchanged |
 
 ### Iteration 3 (spec cleanup)
 

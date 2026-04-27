@@ -190,14 +190,18 @@ works (CNF-21499 fixed).
 
 When processes fail in a T-GM deployment, the system MUST handle each
 process type appropriately:
-- **ts2phc failure**: Don't trigger any events if recovered within the downtime threshold.
-  If not recovered within the downtime threshold, the system MUST emit the appropriate state-change events.
+- **ts2phc failure** (**holdover-breaking** while down past the threshold):
+  Per FR-009 / FR-013, do not downgrade state or class until the downtime
+  threshold expires; then FREERUN and class 248. If recovered within the
+  threshold, suppress the suppressed event categories (FR-017).
 - **ptp4l failure**: Since T-GM ptp4l is a time transmitter, downstream
   clients lose their master. The system MUST announce freerun clock class
   until ptp4l recovers.
-- **gpsd/gpspipe failure**: If GNSS signal is already acquired and DPLL
-  maintains lock, short outages SHOULD be tolerated via the downtime
-  threshold. Extended outages MUST trigger GNSS-lost state transitions.
+- **gpsd/gpspipe failure** (**holdover-capable** when ts2phc keeps running
+  and the GM can remain in true holdover): Short outages SHOULD be
+  tolerated via the downtime threshold (no premature class or state
+  changes). Extended outages MUST trigger GNSS-lost state transitions and
+  announcements consistent with actual timing state (FR-013).
 
 **Why this priority**: T-GM is the timing root; incorrect behavior here
 propagates errors to all downstream devices in the network.
@@ -277,6 +281,8 @@ announcements per the acceptance scenarios.
 - Q: Are synce4l and chronyd failures in scope? → A: Out of scope. They operate independently (SyncE is physical-layer frequency, chronyd is optional NTP bridge) and their failures don't interact with the PTP clock state machine.
 - Q: Is OC and BC (non-telecom) failure handling in scope? → A: Deferred. FR-014 is retained as a noted requirement but implementation is deferred to a follow-up feature. T-BC/T-GM modes are the critical path.
 - Q: What GM state should the system enter when ts2phc fails past the downtime threshold — FREERUN or HOLDOVER (following DPLL)? → A: Always FREERUN. The system cannot maintain holdover with ts2phc down; the timing chain from GNSS/1PPS to PHC is broken regardless of DPLL hardware state.
+- Q: How do FR-009 and FR-013 relate for T-GM (clock class 7 vs FREERUN)? → A: Class 7 applies only when the GM is genuinely in holdover (outages that do not break the ts2phc-mediated timing path). ts2phc loss past the threshold is holdover-breaking: state FREERUN and announced class 248, not 7.
+- Q: May clock state or class change before the downtime threshold expires for threshold-governed failures? → A: No. Until the threshold expires (per FR-004), clock state, PMC clock class, and suppressed synchronization/GM-status events must not change solely because of that outage. Immediate transitions required elsewhere (e.g. FR-006) are unchanged.
 - Q: How does TT ptp4l failure get communicated to downstream clients? → A: Daemon-side only. The daemon emits log lines and metric updates for the cloud-event-proxy and monitoring systems. Downstream PTP clients detect the loss via ANNOUNCE_RECEIPT_TIMEOUT. No pre-emptive PMC push to a dead TT ptp4l is needed.
 
 ## Requirements *(mandatory)*
@@ -312,10 +318,19 @@ announcements per the acceptance scenarios.
   for `CLOCK_REALTIME`. These events are only appropriate for phc2sys
   failures affecting system clock synchronization.
 
-- **FR-009**: In T-GM mode, ts2phc process death past the downtime
-  threshold MUST transition GM state to FREERUN. The system cannot
-  maintain holdover with ts2phc down because the timing chain from
-  GNSS/1PPS to PHC is broken regardless of DPLL hardware state.
+- **FR-009**: In T-GM mode, ts2phc process death is **holdover-breaking**:
+  the timing chain from GNSS/1PPS through ts2phc to the PHC is not
+  credible while ts2phc is down, regardless of DPLL hardware indications.
+  **Until** the configured downtime threshold expires without stable
+  recovery (FR-004), the daemon MUST NOT transition GM timing state to
+  FREERUN, MUST NOT announce freerun clock class for this cause, and MUST
+  inhibit the clock-state, clock-class, and synchronization/GM-status
+  events that the threshold suppresses (FR-017). **After** the threshold
+  expires without recovery, GM timing state MUST transition to FREERUN
+  and announcements MUST match that state (FR-013 holdover-breaking case;
+  class 248). This is mandatory: downstream clients must not observe a
+  holdover class for a broken GNSS-to-PHC path once the outage is treated
+  as real.
 
 - **FR-010**: In T-GM mode, ptp4l (time transmitter) process death MUST
   announce freerun clock class to downstream clients.
@@ -327,9 +342,24 @@ announcements per the acceptance scenarios.
   state that is still valid (e.g., DPLL state, GNSS fix status) while
   the process is within its configured downtime threshold window.
 
-- **FR-013**: Clock class change announcements via PMC MUST reflect the
-  actual timing state during process outages. In holdover, the announced
-  class MUST be 135 (in-spec) or 165 (out-of-spec) for T-BC / T-TSC. For T-GM, the class MUST be 7 (holdover).
+- **FR-013**: Clock class announcements via PMC MUST reflect the **actual**
+  timing state, not merely that a helper process restarted. **T-BC /
+  T-TSC**: In holdover, the announced class MUST be 135 (in-spec) or 165
+  (out-of-spec); in freerun, the announced class MUST be 248. **T-GM**:
+  distinguish **holdover-capable** outages from **holdover-breaking**
+  outages:
+  - **Holdover-capable** (the authoritative timing path through ts2phc to
+    the PHC remains valid; e.g. transient **gpsd** or **gpspipe** failure
+    while ts2phc is still running and the GM remains in a true holdover
+    timing state): the announced class MUST be 7 when the GM is in
+    holdover; when locked, announcements MUST match the normal locked GM
+    quality for the deployment (same as today when no outage applies).
+  - **Holdover-breaking** (the path is not credible for holdover; e.g.
+    **ts2phc** dead beyond the downtime threshold per FR-009, or T-GM
+    **ptp4l** (time transmitter) failure per FR-010): the GM is in FREERUN for timing purposes
+    and the announced class MUST be **248**, not 7. Announcing class 7
+    while claiming holdover when ts2phc has failed past the threshold is
+    inconsistent with FR-009 and MUST NOT occur.
 
 - **FR-014**: [DEFERRED] In OC and BC modes (non-telecom), ptp4l failure
   MUST emit correct state-change events even when DPLL is not present.
@@ -341,6 +371,16 @@ announcements per the acceptance scenarios.
 - **FR-016**: The daemon MUST emit `PTP_PROCESS_STATUS` (down/up) for
   every process death and restart regardless of the downtime threshold.
   The threshold only suppresses clock-state and synchronization events.
+
+- **FR-017**: For any managed process with a configured downtime
+  threshold greater than zero, until that threshold expires without
+  stable recovery (FR-004), the daemon MUST NOT, **based solely on that
+  process outage**, change clock state, change the clock class announced
+  via PMC, or emit the clock-state / synchronization / GM-status events
+  that FR-003–FR-005 suppress. **Exception**: requirements that mandate an
+  **immediate** transition on process death (notably FR-006 for TR ptp4l
+  in T-BC / T-TSC) are not delayed by a downtime threshold. FR-016 is
+  unchanged: process down/up visibility is always emitted.
 
 ### Key Entities
 
@@ -376,8 +416,9 @@ announcements per the acceptance scenarios.
   time (CNF-21499 resolved), with the process functional within 3 seconds.
 
 - **SC-005**: In T-GM mode, ts2phc failure past the downtime threshold
-  results in FREERUN state 100% of the time. ptp4l (TT) failure results
-  in freerun clock class (248) announcement within 2 seconds.
+  results in FREERUN state 100% of the time with freerun clock class (248)
+  announced to match (no class 7 for that failure). ptp4l (TT) failure
+  results in freerun clock class (248) announcement within 2 seconds.
 
 - **SC-006**: All process failures across all clock modes (T-BC, T-GM,
   OC, BC) produce `PTP_PROCESS_STATUS` log lines within 1 second.
