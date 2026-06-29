@@ -19,7 +19,6 @@ const (
 	TypeSyncState         = "sync_state"
 	TypeCacheClear        = "cache_clear"
 	TypeStatusRequest     = "status_request"
-	TypeStatusResponse    = "status_response"
 )
 
 // Synchronization state values.
@@ -122,9 +121,36 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ValuesEqual reports whether m and other carry the same Values.
+func (m Message) ValuesEqual(other Message) bool {
+	switch v := m.Values.(type) {
+	case StateValue:
+		w, ok := other.Values.(StateValue)
+		return ok && v == w
+	case GNSSStateValue:
+		w, ok := other.Values.(GNSSStateValue)
+		return ok && v == w
+	case SyncStateValue:
+		w, ok := other.Values.(SyncStateValue)
+		return ok && v == w
+	case SyncEStateValue:
+		w, ok := other.Values.(SyncEStateValue)
+		return ok && v == w
+	case ClockClassValue:
+		w, ok := other.Values.(ClockClassValue)
+		return ok && v == w
+	case SyncEClockQualityValue:
+		w, ok := other.Values.(SyncEClockQualityValue)
+		return ok && v == w
+	default:
+		return false
+	}
+}
+
 // StateValue carries a PTP or OS clock synchronization state.
 type StateValue struct {
-	State string `json:"state"`
+	State  string `json:"state"`
+	Offset int64  `json:"offset,omitempty"`
 }
 
 // Value implements Value.
@@ -171,11 +197,11 @@ type SyncEClockQualityValue struct {
 // Value implements Value.
 func (SyncEClockQualityValue) Value() {}
 
-// Encode encodes the given msgs as newline deliminated JSON, and writes them to the given writer
-func Encode(w io.Writer, msgs []Message) error {
+// Transmit encodes the given messages as newline-delimited JSON and writes them to the given writer.
+func Transmit(w io.Writer, msgs ...Message) error {
 	enc := json.NewEncoder(w)
-	for _, m := range msgs {
-		if err := enc.Encode(m); err != nil {
+	for _, msg := range msgs {
+		if err := enc.Encode(msg); err != nil {
 			return err
 		}
 	}

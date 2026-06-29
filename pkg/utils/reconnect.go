@@ -5,6 +5,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"time"
 
@@ -42,24 +43,26 @@ func DefaultReconnectConfig() ReconnectConfig {
 // ReconnectWithBackoff attempts to establish a connection using the provided dial function.
 // It retries with exponential backoff up to cfg.MaxAttempts times, and is responsive to
 // cancellation via the provided context.
-// Returns the new connection, or nil if all attempts are exhausted or the context is cancelled.
-func ReconnectWithBackoff(ctx context.Context, dialFn func() (net.Conn, error), cfg ReconnectConfig) net.Conn {
+// Returns the new connection, or an error if all attempts are exhausted or the context is cancelled.
+func ReconnectWithBackoff(ctx context.Context, dialFn func() (net.Conn, error), cfg ReconnectConfig) (net.Conn, error) {
 	glog.Info("Attempting to reconnect to event socket")
 
+	var lastErr error
 	backoff := cfg.BackoffBase
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
 			glog.Info("Stop signal received, aborting reconnect attempt")
-			return nil
+			return nil, ctx.Err()
 		default:
 		}
 
 		newConn, err := dialFn()
 		if err == nil {
 			glog.Infof("Successfully reconnected to event socket after %d attempt(s)", attempt)
-			return newConn
+			return newConn, nil
 		}
+		lastErr = err
 
 		if attempt < cfg.MaxAttempts {
 			glog.Warningf("Failed to reconnect to event socket (attempt %d/%d): %v, retrying in %v",
@@ -68,7 +71,7 @@ func ReconnectWithBackoff(ctx context.Context, dialFn func() (net.Conn, error), 
 			case <-time.After(backoff):
 			case <-ctx.Done():
 				glog.Info("Stop signal received during backoff, aborting reconnect")
-				return nil
+				return nil, ctx.Err()
 			}
 			backoff *= 2
 			if backoff > cfg.MaxBackoff {
@@ -78,5 +81,5 @@ func ReconnectWithBackoff(ctx context.Context, dialFn func() (net.Conn, error), 
 	}
 
 	glog.Errorf("Failed to reconnect to event socket after %d attempts", cfg.MaxAttempts)
-	return nil
+	return nil, fmt.Errorf("failed after %d attempts: %w", cfg.MaxAttempts, lastErr)
 }
