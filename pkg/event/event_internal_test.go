@@ -2,6 +2,7 @@
 package event
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -1266,6 +1267,92 @@ func TestUpdateBCState(t *testing.T) {
 		assert.False(t, needsTTSCAnnounce, "not a TTSC")
 		assert.True(t, needsDownstreamUpdate, "clockClass changed, downstream needs update")
 	})
+}
+
+// TestApplyingSkipsUpdateBCState verifies that while SetApplying(true), ProcessEvents
+// does not run updateBCState, so a source-lost DPLL event cannot move LOCKED→HOLDOVER
+// or rewrite clkLog to T-BC-STATUS s1 (teardown race during applyNodePTPProfiles).
+func TestApplyingSkipsUpdateBCState(t *testing.T) {
+	const cfg = "ts2phc.1.config"
+	const iface = "ens2f0"
+
+	makeBCEvent := func(process EventSource, state PTPState, offset int64, sourceLost bool) Event {
+		return Event{
+			Source:     process,
+			IFace:      iface,
+			CfgName:    cfg,
+			ClockType:  BC,
+			Time:       time.Now().UnixMilli(),
+			WriteToLog: true,
+			Data: &PTPData{
+				State:      state,
+				Values:     map[ValueType]interface{}{OFFSET: offset},
+				SourceLost: sourceLost,
+			},
+		}
+	}
+
+	// Real listener so ProcessEvents can connect without retry/sleep races.
+	socketPath := shortSocketPath(t)
+	ln, err := net.Listen("unix", socketPath)
+	assert.NoError(t, err)
+	defer ln.Close()
+	go acceptAndHold(ln)
+
+	e := &EventHandler{
+		data:           map[string][]*Data{},
+		clkSyncState:   map[string]*clockSyncState{},
+		stdoutToSocket: true,
+		stdoutSocket:   socketPath,
+		LeadingClockData: &LeadingClockParams{
+			leadingInterface:         iface,
+			inSyncConditionThreshold: 100,
+			inSyncConditionTimes:     1,
+			toFreeRunThreshold:       1500,
+			MaxInSpecOffset:          500,
+			upstreamParentDataSet:    &protocol.ParentDataSet{},
+			upstreamTimeProperties:   &protocol.TimePropertiesDS{},
+			downstreamParentDataSet:  &protocol.ParentDataSet{},
+			downstreamTimeProperties: &protocol.TimePropertiesDS{},
+		},
+	}
+
+	// Establish LOCKED
+	e.addEvent(makeBCEvent(DPLL, PTP_LOCKED, 10, false))
+	e.addEvent(makeBCEvent(PTP4lProcessName, PTP_LOCKED, 10, false))
+	fillDataWindows(e, cfg, 10)
+	result, _, _ := e.updateBCState(makeBCEvent(DPLL, PTP_LOCKED, 10, false))
+	assert.Equal(t, PTP_LOCKED, result.state, "setup: should be LOCKED")
+	lockedLog := e.clkSyncState[cfg].clkLog
+
+	// Source-lost inputs that would HOLDOVER if updateBCState ran
+	e.addEvent(makeBCEvent(PTP4lProcessName, PTP_FREERUN, 10, true))
+	e.addEvent(makeBCEvent(DPLL, PTP_HOLDOVER, 10, false))
+
+	e.SetApplying(true)
+	ch := make(chan Event, 4)
+	closeCh := make(chan bool)
+	e.processChannel = ch
+	e.closeCh = closeCh
+	go e.ProcessEvents()
+
+	// Allow ProcessEvents to finish the initial socket connect.
+	time.Sleep(50 * time.Millisecond)
+	ch <- makeBCEvent(DPLL, PTP_HOLDOVER, 10, false)
+	time.Sleep(100 * time.Millisecond)
+	closeCh <- true
+	time.Sleep(50 * time.Millisecond)
+
+	assert.Equal(t, PTP_LOCKED, e.clkSyncState[cfg].state,
+		"must not transition to HOLDOVER while applying")
+	assert.Equal(t, lockedLog, e.clkSyncState[cfg].clkLog,
+		"clkLog must not be rewritten to T-BC-STATUS s1 while applying")
+
+	// Control: same inputs without applying produce HOLDOVER
+	e.SetApplying(false)
+	result, _, needsDownstreamUpdate := e.updateBCState(makeBCEvent(DPLL, PTP_HOLDOVER, 10, false))
+	assert.Equal(t, PTP_HOLDOVER, result.state, "without applying, source lost must HOLDOVER")
+	assert.True(t, needsDownstreamUpdate, "holdover should request downstream update")
 }
 
 func TestUpdateSpecState(t *testing.T) {

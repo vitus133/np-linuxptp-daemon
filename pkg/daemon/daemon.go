@@ -783,6 +783,13 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 
 	glog.Infof("in applyNodePTPProfiles - starting to apply %d node profiles", len(dn.ptpUpdate.NodeProfiles))
 
+	// Suppress T-BC FSM updates during teardown/restart so in-flight DPLL
+	// events after ts2phc Reset cannot emit LOCKED→HOLDOVER / T-BC-STATUS s1.
+	if dn.processManager != nil && dn.processManager.ptpEventHandler != nil {
+		dn.processManager.ptpEventHandler.SetApplying(true)
+		defer dn.processManager.ptpEventHandler.SetApplying(false)
+	}
+
 	dn.stopAllProcesses()
 	// All process should have been stopped,
 	// clear process in process manager.
