@@ -14,6 +14,8 @@ import (
 	"github.com/golang/glog"
 )
 
+var GitCommit = "Undefined"
+
 var (
 	socket    string
 	port      int
@@ -35,7 +37,7 @@ func main() {
 		}
 	}
 
-	glog.Infof("cloud-event-proxy starting, node=%s, socket=%s", nodeName, socket)
+	glog.Infof("cloud-event-proxy starting, node=%s, socket=%s, commit=%s", nodeName, socket, GitCommit)
 
 	closeCh := make(chan struct{})
 
