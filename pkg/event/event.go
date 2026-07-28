@@ -736,10 +736,13 @@ func (e *EventHandler) reconnectEventSocket() bool {
 	}()
 	defer cancel()
 	dialer := net.Dialer{Timeout: socketDialTimeout}
-	newConn := utils.ReconnectWithBackoff(ctx,
+	newConn, err := utils.ReconnectWithBackoff(ctx,
 		func() (net.Conn, error) { return dialer.DialContext(ctx, "unix", e.stdoutSocket) },
 		utils.DefaultReconnectConfig(),
 	)
+	if err != nil {
+		glog.Errorf("failed to reconnect to event socket %s: %v", e.stdoutSocket, err)
+	}
 	if newConn != nil {
 		e.setConn(newConn)
 		return true

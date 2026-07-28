@@ -35,8 +35,9 @@ func TestReconnectWithBackoff_SuccessOnFirstAttempt(t *testing.T) {
 		BackoffBase: 1 * time.Millisecond,
 		MaxBackoff:  10 * time.Millisecond,
 	}
-	conn := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
 	assert.NotNil(t, conn)
+	assert.NoError(t, err)
 }
 
 func TestReconnectWithBackoff_SuccessAfterRetries(t *testing.T) {
@@ -57,8 +58,9 @@ func TestReconnectWithBackoff_SuccessAfterRetries(t *testing.T) {
 		BackoffBase: 1 * time.Millisecond,
 		MaxBackoff:  5 * time.Millisecond,
 	}
-	conn := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
 	assert.NotNil(t, conn)
+	assert.NoError(t, err)
 	assert.Equal(t, 3, attempts)
 }
 
@@ -71,8 +73,9 @@ func TestReconnectWithBackoff_ExhaustedRetries(t *testing.T) {
 		BackoffBase: 1 * time.Millisecond,
 		MaxBackoff:  5 * time.Millisecond,
 	}
-	conn := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
 	assert.Nil(t, conn)
+	assert.Error(t, err)
 }
 
 func TestReconnectWithBackoff_CancelledBeforeStart(t *testing.T) {
@@ -89,8 +92,9 @@ func TestReconnectWithBackoff_CancelledBeforeStart(t *testing.T) {
 		BackoffBase: 1 * time.Millisecond,
 		MaxBackoff:  5 * time.Millisecond,
 	}
-	conn := utils.ReconnectWithBackoff(ctx, dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(ctx, dialFn, cfg)
 	assert.Nil(t, conn)
+	assert.Error(t, err)
 	assert.False(t, called, "dialFn should not have been called after context was cancelled")
 }
 
@@ -115,9 +119,10 @@ func TestReconnectWithBackoff_CancelledDuringBackoff(t *testing.T) {
 		MaxBackoff:  1 * time.Second,
 	}
 	start := time.Now()
-	conn := utils.ReconnectWithBackoff(ctx, dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(ctx, dialFn, cfg)
 	elapsed := time.Since(start)
 	assert.Nil(t, conn)
+	assert.Error(t, err)
 	assert.Equal(t, 1, attempts, "should have stopped after first attempt due to cancellation")
 	assert.Less(t, elapsed, 500*time.Millisecond, "should have returned quickly after cancellation")
 }
@@ -134,9 +139,10 @@ func TestReconnectWithBackoff_BackoffCapsAtMaxBackoff(t *testing.T) {
 		MaxBackoff:  2 * time.Millisecond, // base=1ms, doubles to 2ms then caps
 	}
 	start := time.Now()
-	conn := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
+	conn, err := utils.ReconnectWithBackoff(context.Background(), dialFn, cfg)
 	elapsed := time.Since(start)
 	assert.Nil(t, conn)
+	assert.Error(t, err)
 	assert.Equal(t, 5, attempts)
 	// With cap at 2ms and 4 sleeps: 1 + 2 + 2 + 2 = 7ms total sleep (plus overhead)
 	assert.Less(t, elapsed, 200*time.Millisecond, "backoff should be capped and fast")
