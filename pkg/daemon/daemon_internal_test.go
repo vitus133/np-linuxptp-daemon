@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -3595,6 +3596,29 @@ func TestDelayedPhc2sysStartup(t *testing.T) {
 	ts2phc.ProcessTs2PhcEvents(smallOffset, ts2phcProcessName, "eth0", event.PTP_LOCKED, nil)
 	assert.Equal(t, "", phc2sys.skipInitialStartup)
 	assert.False(t, dn.delayedPhc2sys.Load())
+}
+
+// TestCmdSetEnabled_RespectsPhc2sysDelay ensures ntpfailover's early
+// phc2sysSetEnabled(true) cannot bypass skipInitialStartup and crash-loop
+// phc2sys before UTC offset is available.
+func TestCmdSetEnabled_RespectsPhc2sysDelay(t *testing.T) {
+	dn := &Daemon{}
+	phc2sys := &ptpProcess{
+		name:               phc2sysProcessName,
+		skipInitialStartup: testSkipStartupReason,
+		stopped:            true,
+		cmd:                exec.Command("true"),
+		dn:                 dn,
+	}
+
+	phc2sys.cmdSetEnabled(true)
+	assert.True(t, phc2sys.Stopped(), "phc2sys must stay stopped while delayed")
+	assert.Equal(t, testSkipStartupReason, phc2sys.skipInitialStartup)
+
+	phc2sys.skipInitialStartup = ""
+	// Without a real cmdRun path we only assert the delay gate; clearing the
+	// skip flag is what HandleDelayedPhc2sysStartup does before enable.
+	assert.Equal(t, "", phc2sys.skipInitialStartup)
 }
 
 // TestDelayedPhc2sysStartup_HAProfile verifies that a phc2sys process in a
