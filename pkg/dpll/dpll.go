@@ -704,7 +704,7 @@ func (d *DpllConfig) stateDecision() {
 
 	case DPLL_LOCKED_HO_ACQ, DPLL_LOCKED:
 		if d.isOffsetInRange() {
-			glog.Infof("%s dpll is locked, source is not lost, offset is in range, state is DPLL_LOCKED_HO_ACQ", d.iface)
+			glog.Infof("%s dpll is locked, source is not lost, offset is in range, state is DPLL_%s", d.iface, stateName(dpllStatus))
 			if d.hasLeadingSource() && d.onHoldover {
 				select {
 				case d.holdoverCloseCh <- true:
@@ -716,7 +716,7 @@ func (d *DpllConfig) stateDecision() {
 			d.sourceLost = false
 			d.state = event.PTP_LOCKED
 		} else {
-			glog.Infof("%s dpll is not in spec, state is DPLL_LOCKED_HO_ACQ, offset is out of range, state is FREERUN", d.iface)
+			glog.Infof("%s dpll is not in spec, state is DPLL_%s, offset is out of range, state is FREERUN", d.iface, stateName(dpllStatus))
 			d.state = event.PTP_FREERUN
 			d.inSpec = false
 			d.phaseOffset = FaultyPhaseOffset
