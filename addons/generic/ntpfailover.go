@@ -15,9 +15,10 @@ import (
 type ntpFailoverPluginData struct {
 	gnssFailover    bool
 	cmdSetEnabled   map[string]func(bool)
+	enableQueues    map[string]chan bool
+	enableQueueMu   sync.Mutex
 	pcfsmState      int
 	pcfsmMutex      sync.Mutex
-	pcfsmLocked     bool
 	ts2phcTolerance time.Duration
 	startupDelay    time.Duration
 	expiryTime      time.Time
@@ -49,6 +50,41 @@ var (
 	ts2phcOffsetRegex  = regexp.MustCompile("offset .*s3 freq")
 	chronydOnlineRegex = regexp.MustCompile("chronyd .* starting")
 )
+
+// invokeSetEnabled queues enable/disable on a persistent per-process worker so
+// requests stay ordered and off the ProcessLog/scanner goroutine.
+func invokeSetEnabled(pluginData *ntpFailoverPluginData, pname string, enabled bool) {
+	if pluginData == nil {
+		return
+	}
+	if pluginData.cmdSetEnabled[pname] == nil {
+		return
+	}
+	pluginData.queueFor(pname) <- enabled
+}
+
+func (d *ntpFailoverPluginData) queueFor(pname string) chan bool {
+	d.enableQueueMu.Lock()
+	defer d.enableQueueMu.Unlock()
+	if d.enableQueues == nil {
+		d.enableQueues = make(map[string]chan bool)
+	}
+	ch, ok := d.enableQueues[pname]
+	if ok {
+		return ch
+	}
+	ch = make(chan bool, 16)
+	d.enableQueues[pname] = ch
+	go func() {
+		for enabled := range ch {
+			fn := d.cmdSetEnabled[pname]
+			if fn != nil {
+				fn(enabled)
+			}
+		}
+	}()
+	return ch
+}
 
 func onPTPConfigChangeNtpFailover(data *interface{}, nodeProfile *ptpv1.PtpProfile) error {
 	var _ntpFailoverOpts ntpFailoverOpts
@@ -117,93 +153,75 @@ func processLogNtpFailover(data *interface{}, pname string, log string) string {
 				pluginData.expiryTime = currentTime.Add(pluginData.ts2phcTolerance)
 			}
 
-			pluginData.pcfsmMutex.Lock()
-			ownLock := !pluginData.pcfsmLocked //If locked, then skip, otherwise take lock
-			pluginData.pcfsmMutex.Unlock()
-			if ownLock {
-			done:
-				for {
-					switch pluginData.pcfsmState {
-					case pcsmsStartupDefault:
-						_, foundChronyd := pluginData.cmdSetEnabled[chronydPname]
-						_, foundPhc2Sys := pluginData.cmdSetEnabled[phc2sysPname]
-						if foundChronyd && foundPhc2Sys {
-							pluginData.pcfsmState = pcsmsStartupBoth
-						} else if foundChronyd {
-							pluginData.pcfsmState = pcsmsStartupChronyd
-						} else if foundPhc2Sys {
-							pluginData.pcfsmState = pcsmsStartupPhc2sys
-						} else {
-							break done
-						}
-					case pcsmsStartupPhc2sys:
-						_, foundChronyd := pluginData.cmdSetEnabled[chronydPname]
-						if foundChronyd {
-							pluginData.pcfsmState = pcsmsStartupBoth
-						} else {
-							break done
-						}
-					case pcsmsStartupChronyd:
-						_, foundPhc2Sys := pluginData.cmdSetEnabled[phc2sysPname]
-						if foundPhc2Sys {
-							pluginData.pcfsmState = pcsmsStartupBoth
-						} else {
-							break done
-						}
-					case pcsmsStartupBoth:
-						chronydSetEnabled, ok := pluginData.cmdSetEnabled[chronydPname]
-						if ok {
-							chronydSetEnabled(false)
-						}
-						phc2sysSetEnabled, ok := pluginData.cmdSetEnabled[phc2sysPname]
-						if ok {
-							phc2sysSetEnabled(true)
-						}
-						pluginData.pcfsmState = pcsmsActive
-						continue
-					case pcsmsActive:
-						if pname == ts2phcPname {
-							if currentTime.After(pluginData.expiryTime) {
-								pluginData.pcfsmState = pcsmsOutOfSpec
-								continue
-							}
-						}
-						if pname == chronydPname && chronydOnlineRegex.MatchString(log) {
-							chronydSetEnabled, ok := pluginData.cmdSetEnabled[chronydPname]
-							if ok {
-								chronydSetEnabled(false)
-							}
-						}
-						break done
-					case pcsmsOutOfSpec:
-						if pname == ts2phcPname {
-							if currentTime.After(pluginData.expiryTime) {
-								pluginData.pcfsmState = pcsmsFailover
-								chronydSetEnabled, ok := pluginData.cmdSetEnabled[chronydPname]
-								if ok {
-									chronydSetEnabled(true)
-								}
-								phc2sysSetEnabled, ok := pluginData.cmdSetEnabled[phc2sysPname]
-								if ok {
-									phc2sysSetEnabled(false)
-								}
-								continue
-							}
-						}
-						break done
-					case pcsmsFailover:
-						if pname == ts2phcPname {
-							if currentTime.Before(pluginData.expiryTime) {
-								pluginData.pcfsmState = pcsmsStartupDefault
-								continue
-							}
-						}
+			// Non-blocking: another ProcessLog may already be driving the FSM.
+			if !pluginData.pcfsmMutex.TryLock() {
+				return ret
+			}
+			defer pluginData.pcfsmMutex.Unlock()
+		done:
+			for {
+				switch pluginData.pcfsmState {
+				case pcsmsStartupDefault:
+					_, foundChronyd := pluginData.cmdSetEnabled[chronydPname]
+					_, foundPhc2Sys := pluginData.cmdSetEnabled[phc2sysPname]
+					if foundChronyd && foundPhc2Sys {
+						pluginData.pcfsmState = pcsmsStartupBoth
+					} else if foundChronyd {
+						pluginData.pcfsmState = pcsmsStartupChronyd
+					} else if foundPhc2Sys {
+						pluginData.pcfsmState = pcsmsStartupPhc2sys
+					} else {
 						break done
 					}
+				case pcsmsStartupPhc2sys:
+					_, foundChronyd := pluginData.cmdSetEnabled[chronydPname]
+					if foundChronyd {
+						pluginData.pcfsmState = pcsmsStartupBoth
+					} else {
+						break done
+					}
+				case pcsmsStartupChronyd:
+					_, foundPhc2Sys := pluginData.cmdSetEnabled[phc2sysPname]
+					if foundPhc2Sys {
+						pluginData.pcfsmState = pcsmsStartupBoth
+					} else {
+						break done
+					}
+				case pcsmsStartupBoth:
+					invokeSetEnabled(pluginData, chronydPname, false)
+					invokeSetEnabled(pluginData, phc2sysPname, true)
+					pluginData.pcfsmState = pcsmsActive
+					continue
+				case pcsmsActive:
+					if pname == ts2phcPname {
+						if currentTime.After(pluginData.expiryTime) {
+							pluginData.pcfsmState = pcsmsOutOfSpec
+							continue
+						}
+					}
+					if pname == chronydPname && chronydOnlineRegex.MatchString(log) {
+						invokeSetEnabled(pluginData, chronydPname, false)
+					}
+					break done
+				case pcsmsOutOfSpec:
+					if pname == ts2phcPname {
+						if currentTime.After(pluginData.expiryTime) {
+							pluginData.pcfsmState = pcsmsFailover
+							invokeSetEnabled(pluginData, chronydPname, true)
+							invokeSetEnabled(pluginData, phc2sysPname, false)
+							continue
+						}
+					}
+					break done
+				case pcsmsFailover:
+					if pname == ts2phcPname {
+						if currentTime.Before(pluginData.expiryTime) {
+							pluginData.pcfsmState = pcsmsStartupDefault
+							continue
+						}
+					}
+					break done
 				}
-				pluginData.pcfsmMutex.Lock()
-				pluginData.pcfsmLocked = false //If took lock, then return it
-				pluginData.pcfsmMutex.Unlock()
 			}
 		}
 	}
@@ -224,8 +242,10 @@ func NtpFailover(name string) (*plugin.Plugin, *interface{}) {
 		ProcessLog:             processLogNtpFailover,
 	}
 	pluginData := ntpFailoverPluginData{pcfsmState: pcsmsStartupDefault,
-		pcfsmMutex: sync.Mutex{}}
-	pluginData.cmdSetEnabled = make(map[string]func(bool))
+		pcfsmMutex:    sync.Mutex{},
+		cmdSetEnabled: make(map[string]func(bool)),
+		enableQueues:  make(map[string]chan bool),
+	}
 	var iface interface{} = &pluginData
 	return &_plugin, &iface
 }
