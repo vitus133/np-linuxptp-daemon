@@ -2527,6 +2527,44 @@ func TestUpdateClockStateMetrics(t *testing.T) {
 	}
 }
 
+func TestDeleteMetrics_CleansPhc2sysProcessSeries(t *testing.T) {
+	origNodeName := NodeName
+	defer func() { NodeName = origNodeName }()
+
+	NodeName = "test-node"
+	RegisterMetrics(NodeName)
+
+	tests := []struct {
+		name          string
+		metricCfgName string
+	}{
+		{
+			name:          "non-HA label from ptp4l message tag",
+			metricCfgName: "ptp4l.1.config",
+		},
+		{
+			name:          "legacy label from phc2sys config name",
+			metricCfgName: "phc2sys.1.config",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ProcessStatus.Reset()
+			ProcessRestartCount.Reset()
+
+			UpdateProcessStatusMetrics(phc2sysProcessName, tt.metricCfgName, PtpProcessUp)
+			assert.Equal(t, 1, testutil.CollectAndCount(ProcessStatus))
+			assert.Equal(t, 1, testutil.CollectAndCount(ProcessRestartCount))
+
+			deleteMetrics(nil, nil, phc2sysProcessName, "phc2sys.1.config", "[ptp4l.1.config:{level}]")
+
+			assert.Equal(t, 0, testutil.CollectAndCount(ProcessStatus))
+			assert.Equal(t, 0, testutil.CollectAndCount(ProcessRestartCount))
+		})
+	}
+}
+
 func TestGetPTPThreshold(t *testing.T) {
 	profileName := "test-profile"
 

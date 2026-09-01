@@ -1474,10 +1474,7 @@ func addScheduling(nodeProfile *ptpv1.PtpProfile, cmdLine string) string {
 }
 
 func processStatus(processName, messageTag string, status int64) {
-	cfgName := strings.Replace(strings.Replace(messageTag, "]", "", 1), "[", "", 1)
-	if cfgName != "" {
-		cfgName = strings.Split(cfgName, MessageTagSuffixSeperator)[0]
-	}
+	cfgName := configNameFromMessageTag(messageTag)
 	glog.V(14).Infof("processStatus: process=%s config=%s status=%d", processName, cfgName, status)
 	UpdateProcessStatusMetrics(processName, cfgName, status)
 }
@@ -2409,7 +2406,7 @@ func (dn *Daemon) stopAllProcesses() {
 			p.hasCollectedMetrics = false
 
 			// Cleanup metrics
-			deleteMetrics(p.ifaces, p.haProfile, p.name, p.configName)
+			deleteMetrics(p.ifaces, p.haProfile, p.name, p.configName, p.messageTag)
 
 			if p.name == syncEProcessName && p.syncERelations != nil {
 				deleteSyncEMetrics(p.name, p.configName, p.syncERelations)

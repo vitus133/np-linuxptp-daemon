@@ -260,12 +260,17 @@ func updatePTPMetrics(from, process, iface string, ptpOffset, maxPtpOffset, freq
 		"process": process, "node": NodeName, "iface": iface}).Set(delay)
 }
 
+func configNameFromMessageTag(messageTag string) string {
+	cfgName := strings.Replace(strings.Replace(messageTag, "]", "", 1), "[", "", 1)
+	if cfgName != "" {
+		cfgName = strings.Split(cfgName, MessageTagSuffixSeperator)[0]
+	}
+	return cfgName
+}
+
 // extractMetrics ...
 func extractMetrics(messageTag string, processName string, ifaces config.IFaces, output string) (configName, source string, offset float64, state string, iface string) {
-	configName = strings.Replace(strings.Replace(messageTag, "]", "", 1), "[", "", 1)
-	if configName != "" {
-		configName = strings.Split(configName, MessageTagSuffixSeperator)[0] // remove any suffix added to the configName
-	}
+	configName = configNameFromMessageTag(messageTag) // remove any suffix added to the configName
 	output = removeMessageSuffix(output)
 	if strings.Contains(output, " max ") {
 		ifaceName, ptpOffset, maxPtpOffset, frequencyAdjustment, delay := extractSummaryMetrics(configName, processName, output)
@@ -602,12 +607,20 @@ func deleteSyncEMetrics(process, configName string, relations *synce.Relations) 
 }
 
 // DeleteMetrics ... update ptp ha  metrics
-func deleteMetrics(ifaces config.IFaces, haProfiles map[string][]string, process, config string) {
+func deleteMetrics(ifaces config.IFaces, haProfiles map[string][]string, process, config, messageTag string) {
+	cfgNameFromTag := configNameFromMessageTag(messageTag)
+	if cfgNameFromTag != "" {
+		deleteProcessStatusMetrics(cfgNameFromTag, process)
+	}
+	if config != "" && config != cfgNameFromTag {
+		deleteProcessStatusMetrics(config, process)
+	}
+
 	if process == phc2sysProcessName {
 		deleteOsClockStateMetrics(haProfiles)
 		return
 	}
-	deleteProcessStatusMetrics(config, process)
+
 	for _, iface := range ifaces {
 		InterfaceRole.Delete(prometheus.Labels{
 			"process": ptp4lProcessName, "node": NodeName, "iface": iface.Name})
