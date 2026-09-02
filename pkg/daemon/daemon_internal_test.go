@@ -23,8 +23,11 @@ import (
 	dpll "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/dpll-netlink"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/hardwareconfig"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ipc"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/leap"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/network"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
+	parserconstants "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpv2alpha1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v2alpha1"
@@ -49,6 +52,144 @@ const (
 	labelNode           = "node"
 	labelProcess        = "process"
 )
+
+func TestSysOffsetFilter(t *testing.T) {
+	newProcess := func(samples int) *ptpProcess {
+		return &ptpProcess{tBCAttributes: tBCProcessAttributes{
+			sysOffsetInSyncThreshold:     100,
+			sysOffsetOutOfSyncThreshold:  200,
+			sysOffsetInSyncConfigured:    true,
+			sysOffsetOutOfSyncConfigured: true,
+			sysOffsetSamples:             samples,
+		}}
+	}
+
+	t.Run("in-sync threshold is inclusive", func(t *testing.T) {
+		process := newProcess(2)
+		_, changed := process.updateSysOffsetState(-100)
+		assert.False(t, changed)
+		state, changed := process.updateSysOffsetState(100)
+		assert.True(t, changed)
+		assert.Equal(t, event.PTP_LOCKED, state)
+	})
+
+	t.Run("out-of-sync threshold is exclusive", func(t *testing.T) {
+		process := newProcess(2)
+		_, changed := process.updateSysOffsetState(200)
+		assert.False(t, changed)
+		_, changed = process.updateSysOffsetState(201)
+		assert.False(t, changed)
+		state, changed := process.updateSysOffsetState(-201)
+		assert.True(t, changed)
+		assert.Equal(t, event.PTP_FREERUN, state)
+	})
+
+	t.Run("samples must be consecutive", func(t *testing.T) {
+		process := newProcess(3)
+		process.updateSysOffsetState(10)
+		process.updateSysOffsetState(20)
+		process.updateSysOffsetState(150)
+		_, changed := process.updateSysOffsetState(30)
+		assert.False(t, changed)
+		process.updateSysOffsetState(40)
+		state, changed := process.updateSysOffsetState(50)
+		assert.True(t, changed)
+		assert.Equal(t, event.PTP_LOCKED, state)
+	})
+
+	t.Run("missing thresholds inherit max offset threshold", func(t *testing.T) {
+		process := &ptpProcess{}
+		assert.NoError(t, process.configureSysOffsetFilter(nil, 250))
+		assert.Equal(t, 250.0, process.tBCAttributes.sysOffsetInSyncThreshold)
+		assert.Equal(t, 250.0, process.tBCAttributes.sysOffsetOutOfSyncThreshold)
+		for range defaultSysOffsetSamples - 1 {
+			_, changed := process.updateSysOffsetState(250)
+			assert.False(t, changed)
+		}
+		state, changed := process.updateSysOffsetState(250)
+		assert.True(t, changed)
+		assert.Equal(t, event.PTP_LOCKED, state)
+	})
+
+	t.Run("default sample count is ten", func(t *testing.T) {
+		process := &ptpProcess{}
+		assert.NoError(t, process.configureSysOffsetFilter(map[string]string{
+			sysOffsetInSyncThresholdKey:    "100",
+			sysOffsetOutOfSyncThresholdKey: "200",
+		}, 1000))
+		assert.Equal(t, defaultSysOffsetSamples, process.tBCAttributes.sysOffsetSamples)
+		for range defaultSysOffsetSamples - 1 {
+			_, changed := process.updateSysOffsetState(100)
+			assert.False(t, changed)
+		}
+		state, changed := process.updateSysOffsetState(100)
+		assert.True(t, changed)
+		assert.Equal(t, event.PTP_LOCKED, state)
+	})
+}
+
+func TestProcessParsedMetricsPublishesFilteredOSClockState(t *testing.T) {
+	profileName := "tbc-profile"
+	newProcess := func(clockType event.ClockType) *ptpProcess {
+		return &ptpProcess{
+			name:      phc2sysProcessName,
+			clockType: clockType,
+			ptpClockThreshold: &ptpv1.PtpClockThreshold{
+				MaxOffsetThreshold: 1000,
+				MinOffsetThreshold: -1000,
+			},
+			nodeProfile: ptpv1.PtpProfile{
+				Name: &profileName,
+			},
+			dn: &Daemon{ipcCache: ipc.NewCache(1)},
+			tBCAttributes: tBCProcessAttributes{
+				sysOffsetInSyncThreshold:     100,
+				sysOffsetOutOfSyncThreshold:  200,
+				sysOffsetInSyncConfigured:    true,
+				sysOffsetOutOfSyncConfigured: true,
+				sysOffsetSamples:             1,
+			},
+		}
+	}
+	metrics := &parser.Metrics{
+		Iface:      clockRealTime,
+		Offset:     100,
+		ClockState: parserconstants.ClockStateLocked,
+		Source:     "phc",
+	}
+
+	t.Run("T-BC publishes filtered state", func(t *testing.T) {
+		process := newProcess(event.BC)
+		processParsedMetrics(process, metrics)
+
+		messages := process.dn.ipcCache.Snapshot()
+		assert.Len(t, messages, 1)
+		assert.Equal(t, ipc.TypeOSClockState, messages[0].Type)
+		assert.Equal(t, profileName, messages[0].Profile)
+		assert.Equal(t, clockRealTime, messages[0].IFace)
+		assert.Equal(t, ipc.StateValue{State: ipc.StateLocked, Offset: 100}, messages[0].Values)
+	})
+
+	t.Run("non-T-BC publishes filtered state", func(t *testing.T) {
+		process := newProcess(event.ClockUnset)
+		processParsedMetrics(process, metrics)
+
+		messages := process.dn.ipcCache.Snapshot()
+		assert.Len(t, messages, 1)
+		assert.Equal(t, ipc.TypeOSClockState, messages[0].Type)
+	})
+
+	t.Run("reverse sync direction publishes freerun", func(t *testing.T) {
+		process := newProcess(event.ClockUnset)
+		reverseMetrics := *metrics
+		reverseMetrics.Source = "sys"
+		processParsedMetrics(process, &reverseMetrics)
+
+		messages := process.dn.ipcCache.Snapshot()
+		assert.Len(t, messages, 1)
+		assert.Equal(t, ipc.StateValue{State: ipc.StateFreerun, Offset: 100}, messages[0].Values)
+	})
+}
 
 // vendor defaults are embedded; no filesystem setup needed
 

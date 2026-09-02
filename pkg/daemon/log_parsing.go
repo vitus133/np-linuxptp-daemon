@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/alias"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ipc"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
 	parserconstants "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 )
@@ -150,7 +153,108 @@ func processParsedMetrics(process *ptpProcess, ptpMetrics *parser.Metrics) {
 		}:
 		default:
 		}
+	case phc2sysProcessName:
+		if ptpMetrics.Iface != clockRealTime || ptpMetrics.ClockState == "" {
+			return
+		}
+		if ptpMetrics.Source == "sys" {
+			// CLOCK_REALTIME is the source, not the sink: it is not PTP-disciplined.
+			process.tBCAttributes.sysOffsetInSyncCount = 0
+			process.tBCAttributes.sysOffsetOutOfSyncCount = 0
+			if process.tBCAttributes.sysOffsetState != event.PTP_FREERUN {
+				process.tBCAttributes.sysOffsetState = event.PTP_FREERUN
+				process.publishOSClockState(event.PTP_FREERUN, ptpMetrics.Offset)
+			}
+			return
+		}
+		if ptpMetrics.Source != "phc" {
+			return
+		}
+		if osClockState, changed := process.updateSysOffsetState(ptpMetrics.Offset); changed {
+			process.publishOSClockState(osClockState, ptpMetrics.Offset)
+		}
 	}
+}
+
+func (p *ptpProcess) publishOSClockState(state event.PTPState, offset float64) {
+	if p.dn == nil || p.dn.ipcCache == nil || p.nodeProfile.Name == nil {
+		return
+	}
+	p.dn.ipcCache.Send(ipc.Message{
+		Type:    ipc.TypeOSClockState,
+		Profile: *p.nodeProfile.Name,
+		IFace:   clockRealTime,
+		Values:  ipc.StateValue{State: ipcState(state), Offset: int64(offset)},
+	})
+}
+
+func (p *ptpProcess) configureSysOffsetFilter(settings map[string]string, defaultThreshold int64) error {
+	p.tBCAttributes.sysOffsetSamples = defaultSysOffsetSamples
+	p.tBCAttributes.sysOffsetInSyncThreshold = float64(defaultThreshold)
+	p.tBCAttributes.sysOffsetOutOfSyncThreshold = float64(defaultThreshold)
+	p.tBCAttributes.sysOffsetInSyncConfigured = true
+	p.tBCAttributes.sysOffsetOutOfSyncConfigured = true
+	if value, ok := settings[sysOffsetSamplesKey]; ok {
+		samples, err := strconv.Atoi(value)
+		if err != nil || samples <= 0 {
+			return fmt.Errorf("invalid %s %q: must be a positive integer", sysOffsetSamplesKey, value)
+		}
+		p.tBCAttributes.sysOffsetSamples = samples
+	}
+	if value, ok := settings[sysOffsetInSyncThresholdKey]; ok {
+		threshold, err := strconv.ParseFloat(value, 64)
+		if err != nil || threshold < 0 {
+			return fmt.Errorf("invalid %s %q: must be a non-negative number", sysOffsetInSyncThresholdKey, value)
+		}
+		p.tBCAttributes.sysOffsetInSyncThreshold = threshold
+		p.tBCAttributes.sysOffsetInSyncConfigured = true
+	}
+	if value, ok := settings[sysOffsetOutOfSyncThresholdKey]; ok {
+		threshold, err := strconv.ParseFloat(value, 64)
+		if err != nil || threshold < 0 {
+			return fmt.Errorf("invalid %s %q: must be a non-negative number", sysOffsetOutOfSyncThresholdKey, value)
+		}
+		p.tBCAttributes.sysOffsetOutOfSyncThreshold = threshold
+		p.tBCAttributes.sysOffsetOutOfSyncConfigured = true
+	}
+	return nil
+}
+
+func (p *ptpProcess) updateSysOffsetState(offset float64) (event.PTPState, bool) {
+	t := &p.tBCAttributes
+	if !t.sysOffsetInSyncConfigured && !t.sysOffsetOutOfSyncConfigured {
+		return event.PTP_NOTSET, false
+	}
+
+	absOffset := math.Abs(offset)
+	if t.sysOffsetInSyncConfigured && absOffset <= t.sysOffsetInSyncThreshold {
+		t.sysOffsetInSyncCount++
+		t.sysOffsetOutOfSyncCount = 0
+		if t.sysOffsetInSyncCount >= t.sysOffsetSamples && t.sysOffsetState != event.PTP_LOCKED {
+			t.sysOffsetState = event.PTP_LOCKED
+			return t.sysOffsetState, true
+		}
+		return t.sysOffsetState, false
+	}
+	if t.sysOffsetOutOfSyncConfigured && absOffset > t.sysOffsetOutOfSyncThreshold {
+		t.sysOffsetOutOfSyncCount++
+		t.sysOffsetInSyncCount = 0
+		if t.sysOffsetOutOfSyncCount >= t.sysOffsetSamples && t.sysOffsetState != event.PTP_FREERUN {
+			t.sysOffsetState = event.PTP_FREERUN
+			return t.sysOffsetState, true
+		}
+		return t.sysOffsetState, false
+	}
+	t.sysOffsetInSyncCount = 0
+	t.sysOffsetOutOfSyncCount = 0
+	return t.sysOffsetState, false
+}
+
+func ipcState(state event.PTPState) string {
+	if state == event.PTP_LOCKED {
+		return ipc.StateLocked
+	}
+	return ipc.StateFreerun
 }
 
 // processParsedEvent handles PTP events extracted by the parser

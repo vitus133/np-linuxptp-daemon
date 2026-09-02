@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/alias"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/hardwareconfig"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ipc"
 	ptpnetwork "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/network"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
@@ -63,6 +65,7 @@ const (
 	PTP4L_CONF_DIR                  = "/ptp4l-conf"
 	connectionRetryInterval         = 1 * time.Second
 	eventSocket                     = "/cloud-native/events.sock"
+	cepIPCSocket                    = "/var/run/ptp/events.sock"
 	ClockClassChangeIndicator       = "selected best master clock"
 	GPSDDefaultGNSSSerialPort       = "/dev/gnss0"
 	NMEASourceDisabledIndicator     = "nmea source timed out"
@@ -84,6 +87,10 @@ const (
 	// offset data. Set via PtpSettings["ptp4lOffsetEventWindowSize"]. Tune according to
 	// the ptp4l message rate: 16 for 8275.1 (16 msg/s), 128 for 8275.2 (128 msg/s).
 	defaultPtp4lOffsetEventWindowSize = 16
+	defaultSysOffsetSamples           = 10
+	sysOffsetInSyncThresholdKey       = "sysOffsetInSyncThreshold"
+	sysOffsetOutOfSyncThresholdKey    = "sysOffsetOutOfSyncThreshold"
+	sysOffsetSamplesKey               = "sysOffsetSamples"
 )
 
 var (
@@ -336,8 +343,16 @@ type tBCProcessAttributes struct {
 	offsetFilter      *utils.Window
 	offsetThreshold   float64
 	// offsetEventWindow averages ptp4l offsets and sends them to the T-BC state machine once per second
-	offsetEventWindow  *utils.Window
-	lastOffsetEventSec int64
+	offsetEventWindow            *utils.Window
+	lastOffsetEventSec           int64
+	sysOffsetInSyncThreshold     float64
+	sysOffsetOutOfSyncThreshold  float64
+	sysOffsetInSyncConfigured    bool
+	sysOffsetOutOfSyncConfigured bool
+	sysOffsetSamples             int
+	sysOffsetInSyncCount         int
+	sysOffsetOutOfSyncCount      int
+	sysOffsetState               event.PTPState
 }
 
 func (t *tBCProcessAttributes) activeTRPort() string {
@@ -503,6 +518,8 @@ type Daemon struct {
 	// socket until the replay (/emit-logs) completes. This ensures CEP
 	// processes replay state before any live data arrives.
 	liveGate *liveGate
+	ipcCache *ipc.Cache
+	ipcLink  *ipc.Link
 
 	delayedPhc2sys        atomic.Bool
 	delayedTs2phc         atomic.Bool
@@ -688,8 +705,10 @@ func New(
 		stopCh:               stopCh,
 		saFileWatcher:        saFileWatch,
 		liveGate:             &liveGate{},
+		ipcCache:             ipc.NewCache(64),
 	}
 	dn.hardwareConfigManager = hardwareconfig.NewHardwareConfigManager(kubeClient, namespace, dn.interfaceResolver)
+	dn.ipcLink = ipc.NewLink(cepIPCSocket, dn.ipcCache)
 	pm.daemon = dn
 	return dn
 }
@@ -702,6 +721,9 @@ func New(
 func (dn *Daemon) Run() {
 	glog.Info("Daemon Run() started, waiting for configuration updates...")
 	go dn.processManager.ptpEventHandler.ProcessEvents()
+	ipcCtx, cancelIPC := context.WithCancel(context.Background())
+	defer cancelIPC()
+	go dn.ipcLink.Run(ipcCtx)
 
 	// Setup fsnotify channels (may be nil if watcher initialization failed)
 	var saFilesWatcherEventCh chan fsnotify.Event
@@ -1292,6 +1314,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			},
 			handler: dn.processManager.ptpEventHandler,
 			dn:      dn,
+		}
+		if pProcess == phc2sysProcessName {
+			if configureErr := dprocess.configureSysOffsetFilter(nodeProfile.PtpSettings, dprocess.ptpClockThreshold.MaxOffsetThreshold); configureErr != nil {
+				return configureErr
+			}
 		}
 
 		if pProcess == ptp4lProcessName {
