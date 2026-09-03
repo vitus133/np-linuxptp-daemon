@@ -61,19 +61,23 @@ func osClockStateMessages(msgs []ipc.Message) []ipc.StateValue {
 }
 
 func TestBCClock_AddEvent_StateTransitions(t *testing.T) {
-	t.Run("NOTSET to LOCKED emits ptp_state IPC", func(t *testing.T) {
+	t.Run("NOTSET to LOCKED emits ptp_state and sync_state IPC", func(t *testing.T) {
 		bc, rio := newTestBCClock()
+		bc.SystemClockUpdate(event.PTP_LOCKED)
 		cs := bc.AddEvent(event.Event{
 			IFace: testEns7f0,
 			Data:  &event.PTPData{State: event.PTP_LOCKED},
 		})
 		assert.Equal(t, event.PTP_LOCKED, cs.State)
-		// ptp_state, then os_clock_state, then sync_state
-		require.Len(t, rio.messages, 3)
+		// ptp_state, then sync_state (no os_clock_state: that IPC belongs to
+		// the PHC2SYS/CHRONYD path only).
+		require.Len(t, rio.messages, 2)
 		assert.Equal(t, ipc.TypePTPState, rio.messages[0].Type)
 		assert.Equal(t, testPTP4lCfg, rio.messages[0].Profile)
 		assert.Equal(t, testEns7f0, rio.messages[0].IFace)
 		assert.Equal(t, ipc.StateValue{State: ipc.StateLocked}, rio.messages[0].Values)
+		assert.Equal(t, ipc.TypeSyncState, rio.messages[1].Type)
+		assert.Empty(t, osClockStateMessages(rio.messages))
 	})
 
 	t.Run("LOCKED to FREERUN enters HOLDOVER via mini-holdover", func(t *testing.T) {
@@ -85,10 +89,11 @@ func TestBCClock_AddEvent_StateTransitions(t *testing.T) {
 		})
 		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
 		assert.False(t, bc.holdoverStart.IsZero())
-		// ptp_state, clock_class(7), os_clock_state, sync_state
-		require.Len(t, rio.messages, 4)
+		// ptp_state HOLDOVER, then clock_class 135 (G.8275.1 holdover).
+		require.Len(t, rio.messages, 2)
 		assert.Equal(t, ipc.StateHoldover, rio.messages[0].Values.(ipc.StateValue).State)
-		assert.Equal(t, ipc.ClockClassValue{ClockClass: 7}, rio.messages[1].Values.(ipc.ClockClassValue))
+		assert.Equal(t, ipc.ClockClassValue{ClockClass: 135}, rio.messages[1].Values.(ipc.ClockClassValue))
+		assert.Empty(t, osClockStateMessages(rio.messages))
 	})
 
 	t.Run("duplicate state does not emit ptp_state IPC", func(t *testing.T) {
@@ -219,8 +224,8 @@ func TestBCClock_ClockType(t *testing.T) {
 			Data:  &event.PTPData{State: event.PTP_LOCKED},
 		})
 		assert.Equal(t, event.PTP_LOCKED, cs.State)
-		require.Len(t, rio.messages, 3)
-		assert.Equal(t, ipc.TypePTPState, rio.messages[0].Type)
+		assert.Equal(t, []ipc.StateValue{{State: ipc.StateLocked}}, ptpStateMessages(rio.messages))
+		assert.Empty(t, osClockStateMessages(rio.messages))
 	})
 }
 
@@ -340,8 +345,9 @@ func TestBCClock_MiniHoldover(t *testing.T) {
 		}, time.Second, 10*time.Millisecond)
 
 		assert.Equal(t, []ipc.StateValue{{State: ipc.StateHoldover}, {State: ipc.StateFreerun}}, ptpStateMessages(rio.messages))
-		// HOLDOVER reports class 7, then FREERUN reports class 248.
-		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 7}, {ClockClass: 248}}, clockClassMessages(rio.messages))
+		// HOLDOVER reports class 135, then FREERUN reports class 248.
+		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 135}, {ClockClass: 248}}, clockClassMessages(rio.messages))
+		assert.Empty(t, osClockStateMessages(rio.messages))
 	})
 
 	t.Run("direct holdoverExpired drops to FREERUN with class 248", func(t *testing.T) {
@@ -352,7 +358,7 @@ func TestBCClock_MiniHoldover(t *testing.T) {
 		require.Equal(t, event.PTP_FREERUN, bc.syncState)
 		assert.Equal(t, []ipc.StateValue{{State: ipc.StateFreerun}}, ptpStateMessages(rio.messages))
 		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 248}}, clockClassMessages(rio.messages))
-		assert.Equal(t, []ipc.StateValue{{State: ipc.StateFreerun}}, osClockStateMessages(rio.messages))
+		assert.Empty(t, osClockStateMessages(rio.messages))
 	})
 
 	t.Run("Reset clears holdover state", func(t *testing.T) {
@@ -389,8 +395,8 @@ func TestBCClock_MiniHoldover_RoleTrigger(t *testing.T) {
 		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
 		assert.False(t, bc.holdoverStart.IsZero())
 		assert.Equal(t, []ipc.StateValue{{State: ipc.StateHoldover}}, ptpStateMessages(rio.messages))
-		// holdover class 7 is reported on the transition
-		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 7}}, clockClassMessages(rio.messages))
+		// holdover class 135 is reported on the transition
+		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 135}}, clockClassMessages(rio.messages))
 
 		// re-acquire SLAVE while servo still LOCKED -> back to LOCKED
 		cs = bc.AddEvent(roleEvent(constants.PortRoleSlave))
@@ -454,5 +460,54 @@ func TestBCClock_SetHoldOverTimeoutInterface(t *testing.T) {
 		bc := &BCClock{}
 		bc.SetHoldOverTimeout(5)
 		assert.Equal(t, 5*time.Second, bc.holdOverTimeout)
+	})
+}
+
+// syncStateMessages returns the sequence of sync_state values the recorder saw.
+func syncStateMessages(msgs []ipc.Message) []ipc.SyncStateValue {
+	var out []ipc.SyncStateValue
+	for _, m := range msgs {
+		if m.Type == ipc.TypeSyncState {
+			out = append(out, m.Values.(ipc.SyncStateValue))
+		}
+	}
+	return out
+}
+
+func TestBCClock_MiniHoldover_MessageContract(t *testing.T) {
+	t.Run("holdover keeps real os_clock_state, reports class 135, re-lock restores upstream class", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		// Real OS clock (phc2sys) reports LOCKED before the upstream is lost.
+		bc.SystemClockUpdate(event.PTP_LOCKED)
+		require.Equal(t, event.PTP_LOCKED, bc.osClockState)
+
+		// Lock via a servo event, then announce upstream class 6 while LOCKED.
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{
+			ParentDataSet: protocol.ParentDataSet{GrandmasterClockClass: 6},
+		}})
+		require.Equal(t, []ipc.ClockClassValue{{ClockClass: 6}}, clockClassMessages(rio.messages))
+		rio.messages = nil
+
+		// Upstream lost (servo FREERUN) -> HOLDOVER.
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		require.Equal(t, event.PTP_HOLDOVER, bc.syncState)
+
+		// The OS clock state is untouched by the PTP holdover and no
+		// os_clock_state IPC is fabricated on the interface.
+		assert.Equal(t, event.PTP_LOCKED, bc.osClockState)
+		assert.Empty(t, osClockStateMessages(rio.messages))
+		// Class steps to the G.8275.1 holdover class (135), never to class 7.
+		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 135}}, clockClassMessages(rio.messages))
+		// Overall sync state reflects worst-of(real os LOCKED, ptp HOLDOVER).
+		assert.Equal(t, []ipc.SyncStateValue{{State: ipc.StateHoldover}}, syncStateMessages(rio.messages))
+
+		// Re-acquire -> LOCKED, upstream class 6 re-announced, os clock still LOCKED.
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		assert.Equal(t, event.PTP_LOCKED, cs.State)
+		assert.Equal(t, []ipc.ClockClassValue{{ClockClass: 135}, {ClockClass: 6}}, clockClassMessages(rio.messages))
+		assert.Equal(t, event.PTP_LOCKED, bc.osClockState)
+		assert.Empty(t, osClockStateMessages(rio.messages))
+		assert.Equal(t, []ipc.SyncStateValue{{State: ipc.StateHoldover}, {State: ipc.StateLocked}}, syncStateMessages(rio.messages))
 	})
 }

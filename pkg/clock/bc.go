@@ -40,9 +40,6 @@ type BCClock struct {
 	// holdOverTimeout, so BC/OC exits mini-holdover even with no further
 	// ptp4l events during source loss. Nil when not in HOLDOVER.
 	holdoverTimer *time.Timer
-	// announcedClockClass is the last mini-holdover clock class we emitted.
-	// It is separate from upstreamClockClass (last observed upstream class).
-	announcedClockClass fbprotocol.ClockClass
 	// upstreamClockClass is the last upstream grandmaster clock class
 	// observed via PMC ParentDS data.
 	upstreamClockClass fbprotocol.ClockClass
@@ -179,14 +176,14 @@ func (c *BCClock) announceClockClassLocked(cc fbprotocol.ClockClass) {
 }
 
 // setStateLocked applies a mini-holdover state transition, emitting the
-// corresponding ptp_state, clock_class, os_clock_state and overall sync_state
-// IPCs. The OS clock follows the same PTP source for a BC/OC, so its state is
-// reported alongside the PTP state. Assumes c.mu is held.
+// corresponding ptp_state and clock_class IPCs plus the overall sync_state.
+// The os_clock_state IPC is owned by the PHC2SYS/CHRONYD path
+// (SystemClockUpdate) and is not synthesised here from the PTP state. Assumes
+// c.mu is held.
 func (c *BCClock) setStateLocked(newState event.PTPState) {
 	if c.syncState == newState {
 		return
 	}
-	prev := c.syncState
 	c.syncState = newState
 
 	c.sendIPC(ipc.Message{
@@ -198,23 +195,14 @@ func (c *BCClock) setStateLocked(newState event.PTPState) {
 
 	switch newState {
 	case event.PTP_HOLDOVER:
-		c.announceClockClassLocked(fbprotocol.ClockClass7)
+		// In holdover the BC no longer tracks the primary reference: report
+		// the G.8275.1 holdover clock class (135), not the locked class.
+		c.announceClockClassLocked(protocol.ClockClassHoldover)
 	case event.PTP_FREERUN:
 		c.announceClockClassLocked(protocol.ClockClassFreerun)
 	case event.PTP_LOCKED:
 		if c.upstreamClockClass != 0 {
 			c.announceClockClassLocked(c.upstreamClockClass)
-		}
-	}
-
-	if prev != event.PTP_LOCKED || newState != event.PTP_LOCKED {
-		if c.osClockState != newState {
-			c.osClockState = newState
-			c.sendIPC(ipc.Message{
-				Type:   ipc.TypeOSClockState,
-				IFace:  c.iface,
-				Values: ipc.StateValue{State: event.PtpStateToIPCState(newState)},
-			})
 		}
 	}
 
@@ -303,7 +291,6 @@ func (c *BCClock) Reset() {
 	c.overallSyncState = event.PTP_FREERUN
 	c.clockClass = 0
 	c.upstreamClockClass = 0
-	c.osClockState = event.PTP_FREERUN
 	c.data = nil
 	c.iface = ""
 	c.holdoverStart = time.Time{}
@@ -313,7 +300,7 @@ func (c *BCClock) Reset() {
 
 // updateClockClass records the upstream grandmaster clock class observed via
 // PMC ParentDS data. It is announced while LOCKED; during a mini-holdover the
-// announced class reflects HOLDOVER (7) or FREERUN (248), and on recovery the
+// announced class reflects HOLDOVER (135) or FREERUN (248), and on recovery the
 // FSM re-announces the upstream class.
 func (c *BCClock) updateClockClass(clockClass fbprotocol.ClockClass) {
 	c.mu.Lock()
