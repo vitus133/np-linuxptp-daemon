@@ -1,6 +1,7 @@
 package clock
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ type BCClock struct {
 	// holdOverTimeout, so BC/OC exits mini-holdover even with no further
 	// ptp4l events during source loss. Nil when not in HOLDOVER.
 	holdoverTimer *time.Timer
+	// maxOffsetThreshold is the maximum acceptable absolute servo offset (in
+	// ns) used to gate the transition to LOCKED. LOCKED is only reported once
+	// the offset window is full and its mean is within this bound; an offset
+	// excursion is reported as FREERUN, never as HOLDOVER. Zero disables the
+	// gate (any present source immediately locks).
+	maxOffsetThreshold int64
 	// upstreamClockClass is the last upstream grandmaster clock class
 	// observed via PMC ParentDS data.
 	upstreamClockClass fbprotocol.ClockClass
@@ -59,6 +66,12 @@ type BCClock struct {
 // its upstream source before falling back to FREERUN.
 func (c *BCClock) SetHoldOverTimeout(seconds int64) {
 	c.holdOverTimeout = time.Duration(seconds) * time.Second
+}
+
+// SetMaxOffsetThreshold sets the maximum acceptable absolute servo offset (ns)
+// used to gate the transition to LOCKED. A value <= 0 disables the gate.
+func (c *BCClock) SetMaxOffsetThreshold(offset int64) {
+	c.maxOffsetThreshold = offset
 }
 
 // ClockType returns the clock type for this clock (BC or OC).
@@ -126,7 +139,7 @@ func (c *BCClock) AddEvent(ev event.Event) SyncState {
 		}
 
 		c.mu.Lock()
-		c.applyMiniHoldover(c.sourceLost(d.State))
+		c.applyMiniHoldover(d, c.sourceLost(d.State))
 		state := c.syncState
 		c.mu.Unlock()
 
@@ -245,16 +258,24 @@ func (c *BCClock) holdoverExpired() {
 // applyMiniHoldover runs the BC/OC mini-holdover FSM. When the upstream PTP
 // source is lost, the clock first reports HOLDOVER for holdOverTimeout and only
 // then falls back to FREERUN. If the source is re-acquired during holdover, the
-// clock returns to LOCKED immediately. A never-synced FREERUN stays FREERUN
-// (there is nothing to hold over). The FREERUN fallback is driven by a
-// self-arming timer so it fires without further events. Assumes c.mu is held.
-func (c *BCClock) applyMiniHoldover(sourceLost bool) {
+// clock returns to LOCKED once the offset window is back in spec. A never-synced
+// FREERUN stays FREERUN (there is nothing to hold over). The FREERUN fallback is
+// driven by a self-arming timer so it fires without further events. Assumes
+// c.mu is held.
+func (c *BCClock) applyMiniHoldover(d *event.Data, sourceLost bool) {
 	now := time.Now()
 	if !sourceLost {
-		// Source present: clear holdover and lock.
+		// Source present: clear holdover. Report LOCKED only once the servo
+		// offsets are within spec; while the windowed mean is out of range the
+		// clock reports FREERUN (an offset excursion is not a source loss, so
+		// it must not be reported as HOLDOVER).
 		c.cancelHoldoverTimer()
 		c.holdoverStart = time.Time{}
-		c.setStateLocked(event.PTP_LOCKED)
+		if c.offsetInSpec(d) {
+			c.setStateLocked(event.PTP_LOCKED)
+		} else {
+			c.setStateLocked(event.PTP_FREERUN)
+		}
 		return
 	}
 	if c.holdoverStart.IsZero() {
@@ -280,6 +301,22 @@ func (c *BCClock) applyMiniHoldover(sourceLost bool) {
 	} else {
 		c.setStateLocked(event.PTP_HOLDOVER)
 	}
+}
+
+// offsetInSpec reports whether the servo offsets are good enough to report
+// LOCKED. When the gate is disabled (threshold <= 0) any present source is
+// acceptable. Otherwise the offset window must be full and its mean must be
+// below maxOffsetThreshold. A partial window is never in spec, so a freshly
+// started clock only locks once it has accumulated enough in-range samples to
+// fill the window. Assumes c.mu is held.
+func (c *BCClock) offsetInSpec(d *event.Data) bool {
+	if c.maxOffsetThreshold <= 0 {
+		return true
+	}
+	if d == nil || !d.Window.IsFull() {
+		return false
+	}
+	return math.Abs(d.Window.Mean()) < float64(c.maxOffsetThreshold)
 }
 
 // Reset resets the clock state.

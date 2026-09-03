@@ -83,6 +83,10 @@ func (c *TBC) ClockClass() fbprotocol.ClockClass { return c.syncState.ClockClass
 // FSM, not a BC-style source-loss mini-holdover timer.
 func (c *TBC) SetHoldOverTimeout(seconds int64) {}
 
+// SetMaxOffsetThreshold is a no-op for TBC: offset-based LOCKED gating is
+// handled by the DPLL/ts2phc servo, not the BC-style mini-holdover FSM.
+func (c *TBC) SetMaxOffsetThreshold(offset int64) {}
+
 // ConfigName returns the configuration name.
 func (c *TBC) ConfigName() string { return c.cfgName }
 

@@ -511,3 +511,108 @@ func TestBCClock_MiniHoldover_MessageContract(t *testing.T) {
 		assert.Equal(t, []ipc.SyncStateValue{{State: ipc.StateHoldover}, {State: ipc.StateLocked}}, syncStateMessages(rio.messages))
 	})
 }
+
+// lockedOffsetEvent returns a servo LOCKED event carrying an offset sample.
+func lockedOffsetEvent(offset int64) event.Event {
+	return event.Event{
+		IFace: testEns7f0,
+		Data: &event.PTPData{
+			State:  event.PTP_LOCKED,
+			Values: map[event.ValueType]interface{}{event.OFFSET: offset},
+		},
+	}
+}
+
+// pushLockedSamples drives n LOCKED offset events through the clock and returns
+// the final reported state.
+func pushLockedSamples(t *testing.T, bc *BCClock, offset int64, n int) event.PTPState {
+	t.Helper()
+	var state event.PTPState
+	for i := 0; i < n; i++ {
+		state = bc.AddEvent(lockedOffsetEvent(offset)).State
+	}
+	return state
+}
+
+func TestBCClock_SetMaxOffsetThresholdInterface(t *testing.T) {
+	t.Run("implements Clock interface and stores the threshold", func(t *testing.T) {
+		var _ Clock = (*BCClock)(nil)
+		bc := &BCClock{}
+		bc.SetMaxOffsetThreshold(100)
+		assert.Equal(t, int64(100), bc.maxOffsetThreshold)
+	})
+}
+
+func TestBCClock_MiniHoldover_OffsetGate(t *testing.T) {
+	// Data.AddEvent inserts the first offset sample for an iface without
+	// touching the window (the detail is created first), so the window only
+	// becomes full after WindowSize+1 samples.
+	fill := event.WindowSize + 1
+
+	t.Run("gate disabled by default locks immediately", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		cs := bc.AddEvent(lockedOffsetEvent(1000))
+		assert.Equal(t, event.PTP_LOCKED, cs.State)
+	})
+
+	t.Run("partial window never locks; full in-spec window locks", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		bc.SetMaxOffsetThreshold(100)
+		// WindowSize-1 events: window not full -> stays FREERUN.
+		state := pushLockedSamples(t, bc, 50, event.WindowSize-1)
+		assert.Equal(t, event.PTP_FREERUN, state)
+		// Two more complete a full in-spec window -> LOCKED.
+		state = pushLockedSamples(t, bc, 50, 2)
+		assert.Equal(t, event.PTP_LOCKED, state)
+		assert.Empty(t, osClockStateMessages(rio.messages))
+	})
+
+	t.Run("out-of-spec window reports FREERUN, never LOCKED or HOLDOVER", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		bc.SetMaxOffsetThreshold(100)
+		state := pushLockedSamples(t, bc, 1000, fill)
+		assert.Equal(t, event.PTP_FREERUN, state)
+		assert.True(t, bc.holdoverStart.IsZero())
+		got := ptpStateMessages(rio.messages)
+		for _, s := range got {
+			assert.NotEqual(t, ipc.StateHoldover, s.State)
+		}
+		assert.NotContains(t, got, ipc.StateValue{State: ipc.StateLocked})
+	})
+
+	t.Run("sustained offset excursion from LOCKED drops to FREERUN, not HOLDOVER", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		bc.SetMaxOffsetThreshold(100)
+		require.Equal(t, event.PTP_LOCKED, pushLockedSamples(t, bc, 50, fill))
+		rio.messages = nil
+		// Push large offsets until the windowed mean crosses the threshold.
+		state := pushLockedSamples(t, bc, 1000, fill)
+		assert.Equal(t, event.PTP_FREERUN, state)
+		assert.True(t, bc.holdoverStart.IsZero())
+		got := ptpStateMessages(rio.messages)
+		assert.NotContains(t, got, ipc.StateValue{State: ipc.StateHoldover})
+		assert.True(t, len(got) > 0)
+	})
+
+	t.Run("holdover re-acquire only locks once the offset window recovers", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		bc.SetMaxOffsetThreshold(100)
+		require.Equal(t, event.PTP_LOCKED, pushLockedSamples(t, bc, 50, fill))
+		rio.messages = nil
+
+		// Real source loss (servo FREERUN) -> HOLDOVER.
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
+		assert.False(t, bc.holdoverStart.IsZero())
+
+		// Re-acquired, but offsets are far out of spec -> FREERUN, not LOCKED.
+		cs = bc.AddEvent(lockedOffsetEvent(1000))
+		assert.Equal(t, event.PTP_FREERUN, cs.State)
+		assert.True(t, bc.holdoverStart.IsZero())
+		assert.NotContains(t, ptpStateMessages(rio.messages), ipc.StateValue{State: ipc.StateLocked})
+
+		// Offsets recover; once the window is back in spec -> LOCKED.
+		final := pushLockedSamples(t, bc, 50, fill)
+		assert.Equal(t, event.PTP_LOCKED, final)
+	})
+}

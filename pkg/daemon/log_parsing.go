@@ -110,9 +110,15 @@ func processParsedMetrics(process *ptpProcess, ptpMetrics *parser.Metrics) {
 	// if state is HOLDOVER do not update the state
 	state := convertParserClockStateEventPTPState(ptpMetrics.ClockState)
 
-	// transition to FREERUN if offset is outside configured thresholds
-	if shouldFreeRun(state, ptpMetrics.Offset, process.ptpClockThreshold) {
-		state = event.PTP_FREERUN
+	// transition to FREERUN if offset is outside configured thresholds. The
+	// raw single-sample override is not applied to simple BC/OC ptp4l streams:
+	// those clocks gate LOCKED themselves on a windowed mean of offsets, so a
+	// lone out-of-range sample must not yank the servo state (and trigger the
+	// mini-holdover). T-BC/GM keep the immediate override.
+	if !(process.name == ptp4lProcessName && (process.clockType == event.BC || process.clockType == event.OC)) {
+		if shouldFreeRun(state, ptpMetrics.Offset, process.ptpClockThreshold) {
+			state = event.PTP_FREERUN
+		}
 	}
 
 	switch process.name {

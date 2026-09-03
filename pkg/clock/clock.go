@@ -22,6 +22,10 @@ type Clock interface {
 	// losing its upstream source before falling back to FREERUN. Only
 	// relevant for clock types that implement a mini-holdover; others no-op.
 	SetHoldOverTimeout(seconds int64)
+	// SetMaxOffsetThreshold sets the maximum acceptable absolute servo offset
+	// (ns) used to gate the transition to LOCKED. Only relevant for clock
+	// types that implement windowed offset gating; others no-op.
+	SetMaxOffsetThreshold(offset int64)
 }
 
 // SyncState holds the composite synchronization state of a clock.

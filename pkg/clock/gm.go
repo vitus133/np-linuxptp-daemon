@@ -42,6 +42,10 @@ func (c *GM) ClockClass() fbprotocol.ClockClass { return c.syncState.ClockClass 
 // state machine, not a BC-style source-loss mini-holdover timer.
 func (c *GM) SetHoldOverTimeout(seconds int64) {}
 
+// SetMaxOffsetThreshold is a no-op for GM: offset-based LOCKED gating is
+// handled by the DPLL/ts2phc servo, not the BC-style mini-holdover FSM.
+func (c *GM) SetMaxOffsetThreshold(offset int64) {}
+
 // ConfigName returns the configuration name.
 func (c *GM) ConfigName() string { return c.cfgName }
 

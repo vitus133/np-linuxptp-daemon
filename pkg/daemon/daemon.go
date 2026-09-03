@@ -1042,9 +1042,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	}
 	// BC/OC implement a source-loss mini-holdover: when the upstream PTP source
 	// is lost, the clock stays in HOLDOVER for HoldOverTimeout before dropping
-	// to FREERUN.
+	// to FREERUN. Recovery to LOCKED is gated on the servo offsets being within
+	// MaxOffsetThreshold (windowed mean).
 	if clockType == event.BC || clockType == event.OC {
 		clk.SetHoldOverTimeout(getPTPThreshold(nodeProfile).HoldOverTimeout)
+		clk.SetMaxOffsetThreshold(getPTPThreshold(nodeProfile).MaxOffsetThreshold)
 	}
 
 	for _, pProcess := range ptpProcesses {
