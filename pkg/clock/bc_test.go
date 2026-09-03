@@ -2,10 +2,12 @@ package clock
 
 import (
 	"testing"
+	"time"
 
 	fbprotocol "github.com/facebook/time/ptp/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ipc"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +21,7 @@ func newTestBCClock() (*BCClock, *ipcRecorder) {
 		syncState:        event.PTP_NOTSET,
 		overallSyncState: event.PTP_NOTSET,
 		osClockState:     event.PTP_NOTSET,
+		holdOverTimeout:  defaultBCClockHoldOverTimeout,
 	}, rio
 }
 
@@ -37,16 +40,17 @@ func TestBCClock_AddEvent_StateTransitions(t *testing.T) {
 		assert.Equal(t, ipc.StateValue{State: ipc.StateLocked}, rio.messages[0].Values)
 	})
 
-	t.Run("LOCKED to FREERUN emits ptp_state IPC", func(t *testing.T) {
+	t.Run("LOCKED to FREERUN enters HOLDOVER via mini-holdover", func(t *testing.T) {
 		bc, rio := newTestBCClock()
 		bc.syncState = event.PTP_LOCKED
 		cs := bc.AddEvent(event.Event{
 			IFace: testEns7f0,
 			Data:  &event.PTPData{State: event.PTP_FREERUN},
 		})
-		assert.Equal(t, event.PTP_FREERUN, cs.State)
+		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
+		assert.False(t, bc.holdoverStart.IsZero())
 		require.Len(t, rio.messages, 1)
-		assert.Equal(t, ipc.StateFreerun, rio.messages[0].Values.(ipc.StateValue).State)
+		assert.Equal(t, ipc.StateHoldover, rio.messages[0].Values.(ipc.StateValue).State)
 	})
 
 	t.Run("duplicate state does not emit ptp_state IPC", func(t *testing.T) {
@@ -197,5 +201,150 @@ func TestBCClock_ParentDSUpdate(t *testing.T) {
 		bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{ParentDataSet: parentDS}})
 
 		assert.Empty(t, rio.messages, "updateClockClass should no-op on unchanged class")
+	})
+}
+
+func TestBCClock_MiniHoldover(t *testing.T) {
+	t.Run("never-synced FREERUN stays FREERUN", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.syncState = event.PTP_FREERUN
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_FREERUN, cs.State)
+		assert.True(t, bc.holdoverStart.IsZero())
+	})
+
+	t.Run("re-acquiring LOCKED during holdover returns to LOCKED", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		bc.syncState = event.PTP_LOCKED
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_HOLDOVER, bc.syncState)
+
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		assert.Equal(t, event.PTP_LOCKED, cs.State)
+		assert.True(t, bc.holdoverStart.IsZero())
+		// LOCKED->HOLDOVER and HOLDOVER->LOCKED are two transitions.
+		require.Len(t, rio.messages, 2)
+		assert.Equal(t, ipc.StateHoldover, rio.messages[0].Values.(ipc.StateValue).State)
+		assert.Equal(t, ipc.StateLocked, rio.messages[1].Values.(ipc.StateValue).State)
+	})
+
+	t.Run("stays HOLDOVER within timeout, then FREERUN after expiry", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.holdOverTimeout = 10 * time.Second
+		bc.syncState = event.PTP_LOCKED
+
+		bc.holdoverStart = time.Now().Add(-2 * time.Second)
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_HOLDOVER, cs.State, "should stay HOLDOVER before timeout")
+
+		bc.holdoverStart = time.Now().Add(-11 * time.Second)
+		cs = bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_FREERUN, cs.State, "should fall back to FREERUN after timeout")
+		assert.True(t, bc.holdoverStart.IsZero())
+	})
+
+	t.Run("SetHoldOverTimeout configures the holdover window", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.SetHoldOverTimeout(3)
+		assert.Equal(t, 3*time.Second, bc.holdOverTimeout)
+	})
+
+	t.Run("Reset clears holdover state", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.syncState = event.PTP_LOCKED
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.False(t, bc.holdoverStart.IsZero())
+
+		bc.Reset()
+		assert.True(t, bc.holdoverStart.IsZero())
+		assert.Equal(t, event.PTP_FREERUN, bc.syncState)
+	})
+}
+
+func roleEvent(role constants.PTPPortRole) event.Event {
+	return event.Event{
+		IFace: testEns7f0,
+		Data: &event.PTPData{
+			Values: map[event.ValueType]interface{}{event.PortRole: int64(role)},
+		},
+	}
+}
+
+func TestBCClock_MiniHoldover_RoleTrigger(t *testing.T) {
+	t.Run("role loss while servo LOCKED enters HOLDOVER and recovers on SLAVE", func(t *testing.T) {
+		bc, rio := newTestBCClock()
+		// servo offset event drives LOCKED
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		require.Equal(t, event.PTP_LOCKED, bc.syncState)
+
+		// upstream drops SLAVE (self-elected MASTER) -> HOLDOVER, not FREERUN
+		rio.messages = nil
+		cs := bc.AddEvent(roleEvent(constants.PortRoleMaster))
+		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
+		assert.False(t, bc.holdoverStart.IsZero())
+		assert.Equal(t, ipc.StateHoldover, rio.messages[0].Values.(ipc.StateValue).State)
+
+		// re-acquire SLAVE while servo still LOCKED -> back to LOCKED
+		cs = bc.AddEvent(roleEvent(constants.PortRoleSlave))
+		assert.Equal(t, event.PTP_LOCKED, cs.State)
+		assert.True(t, bc.holdoverStart.IsZero())
+	})
+
+	t.Run("loss roles MASTER/FAULTY/PASSIVE/LISTENING all hold over", func(t *testing.T) {
+		for _, role := range []constants.PTPPortRole{
+			constants.PortRoleMaster,
+			constants.PortRoleFaulty,
+			constants.PortRolePassive,
+			constants.PortRoleListening,
+		} {
+			bc, _ := newTestBCClock()
+			bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+			require.Equal(t, event.PTP_LOCKED, bc.syncState)
+			cs := bc.AddEvent(roleEvent(role))
+			assert.Equal(t, event.PTP_HOLDOVER, cs.State, "role %d should trigger holdover", role)
+		}
+	})
+
+	t.Run("no role observed does not spuriously hold over (haveRole false)", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.syncState = event.PTP_LOCKED
+		// zero-value portRole is Passive(0) but haveRole is false -> ignored
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		assert.Equal(t, event.PTP_LOCKED, cs.State)
+		assert.True(t, bc.holdoverStart.IsZero())
+	})
+
+	t.Run("servo loss still dominates when role is SLAVE", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_LOCKED}})
+		require.Equal(t, event.PTP_LOCKED, bc.syncState)
+		bc.AddEvent(roleEvent(constants.PortRoleSlave))
+		require.Equal(t, event.PTP_LOCKED, bc.syncState)
+
+		// servo degrades to FREERUN even though role is SLAVE -> HOLDOVER
+		cs := bc.AddEvent(event.Event{IFace: testEns7f0, Data: &event.PTPData{State: event.PTP_FREERUN}})
+		assert.Equal(t, event.PTP_HOLDOVER, cs.State)
+	})
+
+	t.Run("Reset clears observed role state", func(t *testing.T) {
+		bc, _ := newTestBCClock()
+		bc.syncState = event.PTP_LOCKED
+		bc.AddEvent(roleEvent(constants.PortRoleFaulty))
+		require.Equal(t, event.PTP_HOLDOVER, bc.syncState)
+		require.True(t, bc.haveRole)
+
+		bc.Reset()
+		assert.False(t, bc.haveRole)
+		assert.Equal(t, constants.PortRoleUnknown, bc.portRole)
+		assert.Equal(t, event.PTP_FREERUN, bc.syncState)
+	})
+}
+
+func TestBCClock_SetHoldOverTimeoutInterface(t *testing.T) {
+	t.Run("implements Clock interface", func(t *testing.T) {
+		var _ Clock = (*BCClock)(nil)
+		bc := &BCClock{}
+		bc.SetHoldOverTimeout(5)
+		assert.Equal(t, 5*time.Second, bc.holdOverTimeout)
 	})
 }

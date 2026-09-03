@@ -38,6 +38,10 @@ func (c *GM) ClockType() event.ClockType { return event.GM }
 // ClockClass returns the current clock class.
 func (c *GM) ClockClass() fbprotocol.ClockClass { return c.syncState.ClockClass }
 
+// SetHoldOverTimeout is a no-op for GM: holdover is driven by the DPLL/ts2phc
+// state machine, not a BC-style source-loss mini-holdover timer.
+func (c *GM) SetHoldOverTimeout(seconds int64) {}
+
 // ConfigName returns the configuration name.
 func (c *GM) ConfigName() string { return c.cfgName }
 

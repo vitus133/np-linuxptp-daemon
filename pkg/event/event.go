@@ -48,6 +48,9 @@ const (
 	ClockIDKey                ValueType = "clock-id"
 	TimePropertiesDataSet     ValueType = "time-props"
 	MaxInSpecOffset           ValueType = "max-in-spec"
+	// PortRole carries the parsed ptp4l port role on a PTPData event. It is
+	// used to drive the BC/OC mini-holdover when the upstream port leaves SLAVE.
+	PortRole ValueType = "port-role"
 )
 
 // ValueTypeHelpTxt provides help text for PTP value types.

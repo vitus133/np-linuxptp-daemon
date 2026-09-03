@@ -1036,8 +1036,15 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	}
 
 	clockCfgName := fmt.Sprintf("ptp4l.%d.config", runID)
-	if _, err = dn.processManager.clockMgr.AddClock(clockCfgName, clockType, pmc.ActiveClient()); err != nil {
+	clk, err := dn.processManager.clockMgr.AddClock(clockCfgName, clockType, pmc.ActiveClient())
+	if err != nil {
 		return fmt.Errorf("failed to register clock for profile %s: %v", *nodeProfile.Name, err)
+	}
+	// BC/OC implement a source-loss mini-holdover: when the upstream PTP source
+	// is lost, the clock stays in HOLDOVER for HoldOverTimeout before dropping
+	// to FREERUN.
+	if clockType == event.BC || clockType == event.OC {
+		clk.SetHoldOverTimeout(getPTPThreshold(nodeProfile).HoldOverTimeout)
 	}
 
 	for _, pProcess := range ptpProcesses {

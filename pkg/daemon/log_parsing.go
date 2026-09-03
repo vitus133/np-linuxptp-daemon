@@ -231,6 +231,25 @@ func processParsedEvent(process *ptpProcess, ptpEvent *parser.PTPEvent) {
 			return
 		}
 
+		// Feed the parsed port role into BC/OC clocks so they can drive the
+		// mini-holdover from an upstream adjacency-loss (port leaves SLAVE),
+		// not just the servo state. Non-blocking, mirroring the offset event.
+		if process.clockType == event.BC || process.clockType == event.OC {
+			select {
+			case process.eventCh <- event.Event{
+				Source:    event.PTP4l,
+				CfgName:   configName,
+				IFace:     interfaceName,
+				ClockType: process.clockType,
+				Time:      time.Now().UnixMilli(),
+				Data: &event.PTPData{
+					Values: map[event.ValueType]interface{}{event.PortRole: int64(ptpEvent.Role)},
+				},
+			}:
+			default:
+			}
+		}
+
 		// Handle role-specific logic
 		switch ptpEvent.Role {
 		case parserconstants.PortRoleSlave:

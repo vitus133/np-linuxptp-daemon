@@ -79,6 +79,10 @@ func (c *TBC) ClockType() event.ClockType { return event.TBC }
 // ClockClass returns the current clock class.
 func (c *TBC) ClockClass() fbprotocol.ClockClass { return c.syncState.ClockClass }
 
+// SetHoldOverTimeout is a no-op for TBC: holdover is driven by the DPLL/ts2phc
+// FSM, not a BC-style source-loss mini-holdover timer.
+func (c *TBC) SetHoldOverTimeout(seconds int64) {}
+
 // ConfigName returns the configuration name.
 func (c *TBC) ConfigName() string { return c.cfgName }
 

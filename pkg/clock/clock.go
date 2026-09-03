@@ -18,6 +18,10 @@ type Clock interface {
 	ConfigName() string
 	ClockType() event.ClockType
 	ClockClass() fbprotocol.ClockClass
+	// SetHoldOverTimeout sets how long the clock stays in HOLDOVER after
+	// losing its upstream source before falling back to FREERUN. Only
+	// relevant for clock types that implement a mini-holdover; others no-op.
+	SetHoldOverTimeout(seconds int64)
 }
 
 // SyncState holds the composite synchronization state of a clock.
@@ -85,6 +89,7 @@ func NewClock(cfgName string, clockType event.ClockType, sendIPC func(ipc.Messag
 			syncState:        event.PTP_NOTSET,
 			overallSyncState: event.PTP_NOTSET,
 			osClockState:     event.PTP_NOTSET,
+			holdOverTimeout:  defaultBCClockHoldOverTimeout,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported clock type %q for config %s", clockType, cfgName)
