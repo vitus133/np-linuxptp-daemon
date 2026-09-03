@@ -1,12 +1,14 @@
 package clock
 
 import (
+	"sync"
 	"time"
 
 	fbprotocol "github.com/facebook/time/ptp/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/ipc"
 	parserconstants "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 )
 
@@ -34,6 +36,19 @@ type BCClock struct {
 	// holdoverStart is when HOLDOVER was entered. A zero value means the
 	// clock is not currently in HOLDOVER.
 	holdoverStart time.Time
+	// holdoverTimer fires the holdover->freerun transition on its own after
+	// holdOverTimeout, so BC/OC exits mini-holdover even with no further
+	// ptp4l events during source loss. Nil when not in HOLDOVER.
+	holdoverTimer *time.Timer
+	// announcedClockClass is the last mini-holdover clock class we emitted.
+	// It is separate from upstreamClockClass (last observed upstream class).
+	announcedClockClass fbprotocol.ClockClass
+	// upstreamClockClass is the last upstream grandmaster clock class
+	// observed via PMC ParentDS data.
+	upstreamClockClass fbprotocol.ClockClass
+	// mu guards the FSM state below, which is also touched by the background
+	// holdover timer goroutine.
+	mu sync.Mutex
 	// portRole is the latest parsed ptp4l port role (from PTPData.Values).
 	// It is one of the upstream source-loss triggers: a transition away from
 	// SLAVE indicates the upstream adjacency is lost. haveRole is true once a
@@ -113,26 +128,21 @@ func (c *BCClock) AddEvent(ev event.Event) SyncState {
 			d.UpdateState()
 		}
 
-		prev := c.syncState
+		c.mu.Lock()
 		c.applyMiniHoldover(c.sourceLost(d.State))
+		state := c.syncState
+		c.mu.Unlock()
 
-		if c.syncState != prev {
-			c.sendIPC(ipc.Message{
-				Type:    ipc.TypePTPState,
-				Profile: c.cfgName,
-				IFace:   ev.IFace,
-				Values:  ipc.StateValue{State: event.PtpStateToIPCState(c.syncState)},
-			})
-		}
-
-		emitOverallSyncStateIfChanged(c.sendIPC, &c.overallSyncState, c.syncState, c.osClockState, c.cfgName)
-
-		return SyncState{State: c.syncState, LeadingIFace: event.LEADING_INTERFACE_UNKNOWN}
+		return SyncState{State: state, LeadingIFace: event.LEADING_INTERFACE_UNKNOWN}
 	}
 }
 
-// SystemClockUpdate updates the OS clock state.
+// SystemClockUpdate updates the OS clock state from an external source
+// (PHC2SYS/CHRONYD). For a BC/OC the OS clock tracks the same PTP source, so
+// this also folds into the overall sync state.
 func (c *BCClock) SystemClockUpdate(osClockState event.PTPState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.osClockState = osClockState
 	emitOverallSyncStateIfChanged(c.sendIPC, &c.overallSyncState, c.syncState, c.osClockState, c.cfgName)
 }
@@ -153,43 +163,147 @@ func (c *BCClock) sourceLost(servo event.PTPState) bool {
 	return false
 }
 
+// announceClockClassLocked emits a clock_class IPC if cc differs from the last
+// announced class. Assumes c.mu is held.
+func (c *BCClock) announceClockClassLocked(cc fbprotocol.ClockClass) {
+	if cc == c.clockClass {
+		return
+	}
+	c.clockClass = cc
+	c.sendIPC(ipc.Message{
+		Type:    ipc.TypeClockClass,
+		Profile: c.cfgName,
+		IFace:   c.iface,
+		Values:  ipc.ClockClassValue{ClockClass: uint8(cc)},
+	})
+}
+
+// setStateLocked applies a mini-holdover state transition, emitting the
+// corresponding ptp_state, clock_class, os_clock_state and overall sync_state
+// IPCs. The OS clock follows the same PTP source for a BC/OC, so its state is
+// reported alongside the PTP state. Assumes c.mu is held.
+func (c *BCClock) setStateLocked(newState event.PTPState) {
+	if c.syncState == newState {
+		return
+	}
+	prev := c.syncState
+	c.syncState = newState
+
+	c.sendIPC(ipc.Message{
+		Type:    ipc.TypePTPState,
+		Profile: c.cfgName,
+		IFace:   c.iface,
+		Values:  ipc.StateValue{State: event.PtpStateToIPCState(newState)},
+	})
+
+	switch newState {
+	case event.PTP_HOLDOVER:
+		c.announceClockClassLocked(fbprotocol.ClockClass7)
+	case event.PTP_FREERUN:
+		c.announceClockClassLocked(protocol.ClockClassFreerun)
+	case event.PTP_LOCKED:
+		if c.upstreamClockClass != 0 {
+			c.announceClockClassLocked(c.upstreamClockClass)
+		}
+	}
+
+	if prev != event.PTP_LOCKED || newState != event.PTP_LOCKED {
+		if c.osClockState != newState {
+			c.osClockState = newState
+			c.sendIPC(ipc.Message{
+				Type:   ipc.TypeOSClockState,
+				IFace:  c.iface,
+				Values: ipc.StateValue{State: event.PtpStateToIPCState(newState)},
+			})
+		}
+	}
+
+	emitOverallSyncStateIfChanged(c.sendIPC, &c.overallSyncState, c.syncState, c.osClockState, c.cfgName)
+}
+
+// cancelHoldoverTimer stops any armed holdover timer.
+func (c *BCClock) cancelHoldoverTimer() {
+	if c.holdoverTimer != nil {
+		c.holdoverTimer.Stop()
+		c.holdoverTimer = nil
+	}
+}
+
+// armHoldoverTimer schedules the holdover->freerun transition after
+// holdOverTimeout. No timer is armed when holdOverTimeout is <= 0.
+func (c *BCClock) armHoldoverTimer() {
+	c.cancelHoldoverTimer()
+	if c.holdOverTimeout <= 0 {
+		return
+	}
+	c.holdoverTimer = time.AfterFunc(c.holdOverTimeout, c.holdoverExpired)
+}
+
+// holdoverExpired runs on the timer goroutine and drops the clock to FREERUN
+// when holdOverTimeout elapses while still in HOLDOVER. This lets the clock
+// exit mini-holdover even when no further ptp4l events arrive during source
+// loss.
+func (c *BCClock) holdoverExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.syncState != event.PTP_HOLDOVER {
+		return
+	}
+	c.holdoverStart = time.Time{}
+	c.cancelHoldoverTimer()
+	c.setStateLocked(event.PTP_FREERUN)
+}
+
 // applyMiniHoldover runs the BC/OC mini-holdover FSM. When the upstream PTP
 // source is lost, the clock first reports HOLDOVER for holdOverTimeout and only
 // then falls back to FREERUN. If the source is re-acquired during holdover, the
 // clock returns to LOCKED immediately. A never-synced FREERUN stays FREERUN
-// (there is nothing to hold over).
+// (there is nothing to hold over). The FREERUN fallback is driven by a
+// self-arming timer so it fires without further events. Assumes c.mu is held.
 func (c *BCClock) applyMiniHoldover(sourceLost bool) {
 	now := time.Now()
 	if !sourceLost {
-		// Source present: clear any in-progress holdover and lock.
+		// Source present: clear holdover and lock.
+		c.cancelHoldoverTimer()
 		c.holdoverStart = time.Time{}
-		c.syncState = event.PTP_LOCKED
+		c.setStateLocked(event.PTP_LOCKED)
 		return
 	}
-	// Source lost.
 	if c.holdoverStart.IsZero() {
-		// Not currently in holdover. Enter it only if we previously had a
-		// synchronized source; a fresh FREERUN (never locked) has nothing
-		// to hold over and stays FREERUN.
-		if c.syncState == event.PTP_LOCKED {
+		// Enter holdover only if previously synchronized; otherwise a
+		// never-synced clock stays FREERUN.
+		if c.syncState == event.PTP_LOCKED && c.holdOverTimeout > 0 {
 			c.holdoverStart = now
-			c.syncState = event.PTP_HOLDOVER
+			c.armHoldoverTimer()
+			c.setStateLocked(event.PTP_HOLDOVER)
 		} else {
-			c.syncState = event.PTP_FREERUN
+			c.setStateLocked(event.PTP_FREERUN)
 		}
-	} else if now.Sub(c.holdoverStart) >= c.holdOverTimeout {
+		return
+	}
+	// Already in holdover: the timer handles the timeout transition. Keep
+	// HOLDOVER while within the window; only fall through here if the timeout
+	// is disabled or already elapsed (e.g. a very short timeout racing ahead of
+	// the timer goroutine).
+	if c.holdOverTimeout <= 0 || now.Sub(c.holdoverStart) >= c.holdOverTimeout {
+		c.cancelHoldoverTimer()
 		c.holdoverStart = time.Time{}
-		c.syncState = event.PTP_FREERUN
+		c.setStateLocked(event.PTP_FREERUN)
 	} else {
-		c.syncState = event.PTP_HOLDOVER
+		c.setStateLocked(event.PTP_HOLDOVER)
 	}
 }
 
 // Reset resets the clock state.
 func (c *BCClock) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancelHoldoverTimer()
 	c.syncState = event.PTP_FREERUN
 	c.overallSyncState = event.PTP_FREERUN
 	c.clockClass = 0
+	c.upstreamClockClass = 0
+	c.osClockState = event.PTP_FREERUN
 	c.data = nil
 	c.iface = ""
 	c.holdoverStart = time.Time{}
@@ -197,15 +311,15 @@ func (c *BCClock) Reset() {
 	c.haveRole = false
 }
 
+// updateClockClass records the upstream grandmaster clock class observed via
+// PMC ParentDS data. It is announced while LOCKED; during a mini-holdover the
+// announced class reflects HOLDOVER (7) or FREERUN (248), and on recovery the
+// FSM re-announces the upstream class.
 func (c *BCClock) updateClockClass(clockClass fbprotocol.ClockClass) {
-	if clockClass == c.clockClass {
-		return
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.upstreamClockClass = clockClass
+	if c.syncState == event.PTP_LOCKED {
+		c.announceClockClassLocked(clockClass)
 	}
-	c.clockClass = clockClass
-	c.sendIPC(ipc.Message{
-		Type:    ipc.TypeClockClass,
-		Profile: c.cfgName,
-		IFace:   c.iface,
-		Values:  ipc.ClockClassValue{ClockClass: uint8(clockClass)},
-	})
 }
