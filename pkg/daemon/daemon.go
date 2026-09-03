@@ -88,6 +88,11 @@ const (
 	// offset data. Set via PtpSettings["ptp4lOffsetEventWindowSize"]. Tune according to
 	// the ptp4l message rate: 16 for 8275.1 (16 msg/s), 128 for 8275.2 (128 msg/s).
 	defaultPtp4lOffsetEventWindowSize = 16
+	// defaultSysOffsetSamples is the number of consecutive phc2sys offset samples that must
+	// breach an OS-clock threshold before the filtered state flips. Shared for both the
+	// in-sync and out-of-sync thresholds. Overridable via
+	// PtpClockThreshold.sysOffsetSamples.
+	defaultSysOffsetSamples = 10
 )
 
 var (
@@ -263,6 +268,62 @@ func (t *tBCProcessAttributes) allPortsLost() bool {
 	return true
 }
 
+// osClockStateFromHysteresis maps the generic filter state onto the daemon's event type.
+func osClockStateFromHysteresis(s utils.HysteresisState) event.PTPState {
+	switch s {
+	case utils.HysteresisLow:
+		return event.PTP_LOCKED
+	case utils.HysteresisHigh:
+		return event.PTP_FREERUN
+	default:
+		return event.PTP_NOTSET
+	}
+}
+
+// configureOSClockFilter builds the OS-clock hysteresis filter from the profile's
+// PtpClockThreshold, defaulting both thresholds to defaultThreshold (the profile's
+// resolved maxOffsetThreshold) and the sample count to defaultSysOffsetSamples when the
+// corresponding field is unset. The filter is the generic utils.HysteresisFilter, the
+// same reusable threshold/consecutive-sample mechanism available to other offset
+// consumers in the system.
+func (p *ptpProcess) configureOSClockFilter(th *ptpv1.PtpClockThreshold, defaultThreshold float64) {
+	p.osClockFilter.Config(defaultThreshold, defaultThreshold, defaultSysOffsetSamples)
+	if th != nil {
+		if th.SysOffsetInSyncThreshold != nil {
+			p.osClockFilter.Config(float64(*th.SysOffsetInSyncThreshold),
+				p.osClockFilter.OutOfSyncThreshold(), p.osClockFilter.SamplesRequired())
+		}
+		if th.SysOffsetOutOfSyncThreshold != nil {
+			p.osClockFilter.Config(p.osClockFilter.InSyncThreshold(),
+				float64(*th.SysOffsetOutOfSyncThreshold), p.osClockFilter.SamplesRequired())
+		}
+		if th.SysOffsetSamples != nil && *th.SysOffsetSamples > 0 {
+			p.osClockFilter.Config(p.osClockFilter.InSyncThreshold(),
+				p.osClockFilter.OutOfSyncThreshold(), int(*th.SysOffsetSamples))
+		} else if th.SysOffsetSamples != nil {
+			glog.Warningf("invalid sysOffsetSamples=%d, using default %d", *th.SysOffsetSamples, defaultSysOffsetSamples)
+		}
+	}
+}
+
+// updateOSClockState feeds one phc2sys OS-clock sample through the OS-clock state
+// logic. A raw HOLDOVER state (a servo/drift condition, not an offset value) is
+// forwarded as-is and never replaced by an offset-derived state; the hysteresis filter
+// only classifies numerical offset samples into LOCKED/FREERUN.
+func (p *ptpProcess) updateOSClockState(rawOffset float64, rawState event.PTPState) (event.PTPState, bool) {
+	if rawState == event.PTP_HOLDOVER {
+		changed := p.osClockState != event.PTP_HOLDOVER
+		p.osClockState = event.PTP_HOLDOVER
+		if changed {
+			p.osClockFilter.Reset() // fresh offset window once holdover ends
+		}
+		return event.PTP_HOLDOVER, changed
+	}
+	state, changed := p.osClockFilter.Update(rawOffset)
+	p.osClockState = osClockStateFromHysteresis(state)
+	return osClockStateFromHysteresis(state), changed
+}
+
 type ptpProcess struct {
 	name                  string
 	ifaces                config.IFaces
@@ -285,6 +346,8 @@ type ptpProcess struct {
 	syncERelations        *synce.Relations
 	hasCollectedMetrics   bool
 	tBCAttributes         tBCProcessAttributes
+	osClockFilter         utils.HysteresisFilter
+	osClockState          event.PTPState
 	GrandmasterClockClass uint8
 	handler               *clockmgr.ClockManager
 	dn                    *Daemon
@@ -1188,6 +1251,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			}
 		} else if pProcess == phc2sysProcessName {
 			glog.Infof("Setting up phc2sys (%s)", clockType)
+			// Configure the OS-clock E3 hysteresis filter from PtpClockThreshold. Thresholds
+			// default to the profile's resolved maxOffsetThreshold and samples to
+			// defaultSysOffsetSamples when unset.
+			defaultOSClockThreshold := float64(getPTPThreshold(nodeProfile).MaxOffsetThreshold)
+			dprocess.configureOSClockFilter((*nodeProfile).PtpClockThreshold, defaultOSClockThreshold)
 			// Delay phc2sys startup until the clock source has synchronized.
 			dn.delayedStartupMu.Lock()
 			dprocess.skipInitialStartup = "waiting for PHC synchronization before adjusting system time"

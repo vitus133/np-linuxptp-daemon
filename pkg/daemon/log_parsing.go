@@ -172,19 +172,28 @@ func processParsedMetrics(process *ptpProcess, ptpMetrics *parser.Metrics) {
 		default:
 		}
 	case phc2sysProcessName:
-		select {
-		case process.eventCh <- event.Event{
-			Source:    event.PHC2SYS,
-			CfgName:   configName,
-			IFace:     ptpMetrics.Iface,
-			ClockType: process.clockType,
-			Time:      time.Now().UnixMilli(),
-			Data: &event.PTPData{
-				State:  state,
-				Values: map[event.ValueType]interface{}{event.OFFSET: int64(ptpMetrics.Offset)},
-			},
-		}:
-		default:
+		// Apply the OS-clock E3 hysteresis filter. The raw shouldFreeRun override applied
+		// above is discarded for phc2sys: the filtered state (LOCKED/FREERUN from
+		// sysOffsetInSyncThreshold/sysOffsetOutOfSyncThreshold, deduped over
+		// sysOffsetSamples samples) drives the PHC2SYS event and thus the O-RAN
+		// OsClockSyncStateChange. Emit only on transition so a single jitter sample across
+		// the threshold does not flap E3.
+		osState, osChanged := process.updateOSClockState(ptpMetrics.Offset, state)
+		if osChanged {
+			select {
+			case process.eventCh <- event.Event{
+				Source:    event.PHC2SYS,
+				CfgName:   configName,
+				IFace:     ptpMetrics.Iface,
+				ClockType: process.clockType,
+				Time:      time.Now().UnixMilli(),
+				Data: &event.PTPData{
+					State:  osState,
+					Values: map[event.ValueType]interface{}{event.OFFSET: int64(ptpMetrics.Offset)},
+				},
+			}:
+			default:
+			}
 		}
 	case chronydProcessName:
 		select {
