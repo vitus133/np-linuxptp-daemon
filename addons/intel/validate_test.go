@@ -729,6 +729,75 @@ func TestValidateE825Opts_UnknownFields(t *testing.T) {
 	}
 }
 
+func TestValidateE825PhaseAdjustments(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    map[string]interface{}
+		errSubstr string
+	}{
+		{
+			name: "valid device and pin labels with signed values",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"eno5": map[string]int64{"REF0P": -8600}},
+			},
+		},
+		{
+			name: "empty adjustment group is a no-op",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"eno5": map[string]int64{}},
+			},
+		},
+		{
+			name: "empty device key",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"": map[string]int64{"REF0P": -8600}},
+			},
+			errSubstr: "device key must not be empty",
+		},
+		{
+			name: "empty pin label",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"eno5": map[string]int64{"": -8600}},
+			},
+			errSubstr: "pin label must not be empty",
+		},
+		{
+			name: "outside DPLL int32 range",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"eno5": map[string]int64{"REF0P": 1 << 31}},
+			},
+			errSubstr: "exceeds DPLL int32 range",
+		},
+		{
+			name: "null is not interpreted as explicit zero",
+			config: map[string]interface{}{
+				"phaseAdjustments": map[string]interface{}{"eno5": map[string]interface{}{"REF0P": nil}},
+			},
+			errSubstr: "must be an integer, not null",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.config)
+			assert.NoError(t, err)
+			errs := ValidateE825Opts(raw)
+			if tc.errSubstr == "" {
+				assert.Empty(t, errs)
+				return
+			}
+			assert.NotEmpty(t, errs)
+			found := false
+			for _, validationErr := range errs {
+				if contains(validationErr, tc.errSubstr) {
+					found = true
+				}
+			}
+			assert.True(t, found, "expected error containing %q, got %v", tc.errSubstr, errs)
+		})
+	}
+}
+
 func TestValidateE830Opts_UnknownFields(t *testing.T) {
 	tests := []struct {
 		name      string

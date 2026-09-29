@@ -244,6 +244,7 @@ func ValidateE825Opts(rawJSON []byte) []string {
 	if fieldErrs := validateUnknownFields(rawJSON, &check); len(fieldErrs) > 0 {
 		errs = append(errs, fieldErrs...)
 	}
+	errs = append(errs, validateE825PhaseAdjustmentNulls(rawJSON)...)
 
 	// Parse normally to validate field values
 	var opts E825Opts
@@ -253,7 +254,57 @@ func ValidateE825Opts(rawJSON []byte) []string {
 	}
 
 	errs = append(errs, validateDevicePins(opts.DevicePins, "e825")...)
+	errs = append(errs, validateE825PhaseAdjustments(opts.PhaseAdjustments)...)
 
+	return errs
+}
+
+func validateE825PhaseAdjustmentNulls(rawJSON []byte) []string {
+	var raw struct {
+		PhaseAdjustments map[string]json.RawMessage `json:"phaseAdjustments"`
+	}
+	if err := json.Unmarshal(rawJSON, &raw); err != nil {
+		return nil // The normal E825Opts parse reports malformed JSON and value types.
+	}
+	var errs []string
+	for device, rawPins := range raw.PhaseAdjustments {
+		var pins map[string]json.RawMessage
+		if err := json.Unmarshal(rawPins, &pins); err != nil {
+			continue // The normal E825Opts parse reports malformed maps.
+		}
+		for label, value := range pins {
+			if string(bytes.TrimSpace(value)) == "null" {
+				errs = append(errs, fmt.Sprintf("e825 phaseAdjustments[%q][%q]: value must be an integer, not null", device, label))
+			}
+		}
+	}
+	return errs
+}
+
+func validateE825PhaseAdjustments(adjustments map[string]map[string]int64) []string {
+	const (
+		minInt32 = -1 << 31
+		maxInt32 = 1<<31 - 1
+	)
+	var errs []string
+	for device, pins := range adjustments {
+		if len(pins) == 0 {
+			continue
+		}
+		if strings.TrimSpace(device) == "" {
+			errs = append(errs, "e825 phaseAdjustments: device key must not be empty")
+			continue
+		}
+		for label, value := range pins {
+			if strings.TrimSpace(label) == "" {
+				errs = append(errs, fmt.Sprintf("e825 phaseAdjustments[%q]: pin label must not be empty", device))
+				continue
+			}
+			if value < minInt32 || value > maxInt32 {
+				errs = append(errs, fmt.Sprintf("e825 phaseAdjustments[%q][%q]: value %d ps exceeds DPLL int32 range", device, label, value))
+			}
+		}
+	}
 	return errs
 }
 

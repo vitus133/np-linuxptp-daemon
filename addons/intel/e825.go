@@ -49,13 +49,17 @@ type E825Opts struct {
 	EnableDefaultConfig bool        `json:"enableDefaultConfig"`
 	UblxCmds            UblxCmdList `json:"ublxCmds"`
 	Gnss                GnssOptions `json:"gnss"`
+	// PhaseAdjustments maps a device to DPLL pin labels and signed absolute picosecond values.
+	// Only listed entries are written; omitted entries are never reset.
+	PhaseAdjustments map[string]map[string]int64 `json:"phaseAdjustments"`
 }
 
 // E825PluginData is the data structure for e825 plugin
 type E825PluginData struct {
 	PluginData
-	dpllPins    []*dpll_netlink.PinInfo
-	dpllDevices []*dpll_netlink.DoDeviceGetReply
+	dpllPins              []*dpll_netlink.PinInfo
+	dpllDevices           []*dpll_netlink.DoDeviceGetReply
+	phaseAdjustmentWriter e825PhaseAdjustmentWriter
 }
 
 func tbcConfigured(nodeProfile *ptpv1.PtpProfile) bool {
@@ -191,6 +195,9 @@ func OnPTPConfigChangeE825(data *interface{}, nodeProfile *ptpv1.PtpProfile) err
 				if inputPinErr := pluginData.setupDpllInputPins(); inputPinErr != nil {
 					glog.Errorf("Could not enable DPLL input pins for T-BC: %s", inputPinErr)
 				}
+			}
+			if err = pluginData.applyPhaseAdjustments(nodeProfile, e825Opts); err != nil {
+				return err
 			}
 		}
 	}
@@ -394,7 +401,8 @@ func E825(name string) (*plugin.Plugin, *interface{}) {
 	}
 	glog.Infof("registering e825 plugin")
 	pluginData := E825PluginData{
-		PluginData: PluginData{name: pluginNameE825},
+		PluginData:            PluginData{name: pluginNameE825},
+		phaseAdjustmentWriter: netlinkE825PhaseAdjustmentWriter{},
 	}
 	_plugin := plugin.Plugin{
 		Name:               pluginNameE825,
