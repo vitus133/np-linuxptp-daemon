@@ -27,6 +27,8 @@ const measurementSamples = 16
 
 const nanosecondsPerSecond int64 = 1_000_000_000
 
+const residualOffsetThreshold int64 = nanosecondsPerSecond
+
 type pluginOptions struct {
 	Timeout string `json:"timeout,omitempty"`
 }
@@ -183,24 +185,30 @@ func parseSample(line string) (int64, bool) {
 }
 
 func updatePHC(name string, profile *ptpv1.PtpProfile, interfaces []string, phc string, timeout time.Duration) error {
-	offset, err := measureOffset(context.Background(), profile, interfaces, timeout)
-	if err != nil {
-		return fmt.Errorf("measure PHC offset for interfaces %v: %w", interfaces, err)
+	for adjustment := 0; adjustment < 2; adjustment++ {
+		offset, err := measureOffset(context.Background(), profile, interfaces, timeout)
+		if err != nil {
+			return fmt.Errorf("measure PHC offset for interfaces %v: %w", interfaces, err)
+		}
+		glog.Infof("phc-first-step measurement complete: profile=%s interfaces=%v PHC=%s samples=%d latestOffset=%d ns", name, interfaces, phc, measurementSamples, offset)
+		if adjustment > 0 && offset <= residualOffsetThreshold && offset >= -residualOffsetThreshold {
+			glog.Infof("phc-first-step residual offset within threshold: profile=%s PHC=%s latestOffset=%d ns threshold=%d ns", name, phc, offset, residualOffsetThreshold)
+			return nil
+		}
+		phcTime, err := readPHCTime(context.Background(), phc)
+		if err != nil {
+			return fmt.Errorf("read PHC %s: %w", phc, err)
+		}
+		corrected, err := correctedTime(phcTime, offset)
+		if err != nil {
+			return fmt.Errorf("calculate corrected PHC time for %s: %w", phc, err)
+		}
+		glog.Infof("phc-first-step correction calculated: profile=%s PHC=%s currentPHC=%d ns targetPHC=%d ns", name, phc, phcTime, corrected)
+		if err := setPHCTime(context.Background(), phc, corrected); err != nil {
+			return fmt.Errorf("set PHC %s: %w", phc, err)
+		}
+		glog.Infof("phc-first-step adjustment applied: profile=%s interfaces=%v PHC=%s adjustment=%d offset=%d ns", name, interfaces, phc, adjustment+1, offset)
 	}
-	glog.Infof("phc-first-step measurement complete: profile=%s interfaces=%v PHC=%s samples=%d latestOffset=%d ns", name, interfaces, phc, measurementSamples, offset)
-	phcTime, err := readPHCTime(context.Background(), phc)
-	if err != nil {
-		return fmt.Errorf("read PHC %s: %w", phc, err)
-	}
-	corrected, err := correctedTime(phcTime, offset)
-	if err != nil {
-		return fmt.Errorf("calculate corrected PHC time for %s: %w", phc, err)
-	}
-	glog.Infof("phc-first-step correction calculated: profile=%s PHC=%s currentPHC=%d ns targetPHC=%d ns", name, phc, phcTime, corrected)
-	if err := setPHCTime(context.Background(), phc, corrected); err != nil {
-		return fmt.Errorf("set PHC %s: %w", phc, err)
-	}
-	glog.Infof("phc-first-step applied: profile=%s interfaces=%v PHC=%s offset=%d", name, interfaces, phc, offset)
 	return nil
 }
 

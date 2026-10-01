@@ -441,6 +441,76 @@ func TestMeasureOffsetUsesLatestSample(t *testing.T) {
 	}
 }
 
+func TestUpdatePHCRemeasuresAndAdjustsResidualOffset(t *testing.T) {
+	tests := []struct {
+		name         string
+		secondOffset string
+		wantLog      string
+	}{
+		{
+			name:         "adjust again above one second",
+			secondOffset: "1500000001",
+			wantLog:      "get\nset 98.000000000\nget\nset 96.499999999\n",
+		},
+		{
+			name:         "adjust again below negative one second",
+			secondOffset: "-1500000001",
+			wantLog:      "get\nset 98.000000000\nget\nset 99.500000001\n",
+		},
+		{
+			name:         "do not adjust at one second",
+			secondOffset: "1000000000",
+			wantLog:      "get\nset 98.000000000\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			countFile := filepath.Join(dir, "ptp4l-count")
+			phcTimeFile := filepath.Join(dir, "phc-time")
+			phcLogFile := filepath.Join(dir, "phc-ctl.log")
+			if err := os.WriteFile(phcTimeFile, []byte("100.000000000\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ptp4l := "#!/bin/sh\n" +
+				"if [ -f \"$PTP_RUN_COUNT\" ]; then read count < \"$PTP_RUN_COUNT\"; else count=0; fi\n" +
+				"count=$((count + 1))\nprintf '%s\\n' \"$count\" > \"$PTP_RUN_COUNT\"\n" +
+				"if [ \"$count\" -eq 1 ]; then offset=2000000000; else offset=\"$PTP_SECOND_OFFSET\"; fi\n" +
+				"i=0\nwhile [ \"$i\" -lt 16 ]; do\n" +
+				"  printf 'master offset %s s0 freq +1 path delay 10\\n' \"$offset\"\n" +
+				"  i=$((i + 1))\ndone\n"
+			phcCtl := "#!/bin/sh\ncase \"$3\" in\n" +
+				"get) echo get >> \"$PHC_CTL_LOG\"; read value < \"$PHC_TIME_FILE\"; echo \"clock time is $value\" ;;\n" +
+				"set) echo \"set $4\" >> \"$PHC_CTL_LOG\"; printf '%s\\n' \"$4\" > \"$PHC_TIME_FILE\" ;;\n" +
+				"*) exit 2 ;;\nesac\n"
+			installFakeCommands(t, ptp4l, phcCtl)
+			t.Setenv("PTP_RUN_COUNT", countFile)
+			t.Setenv("PTP_SECOND_OFFSET", test.secondOffset)
+			t.Setenv("PHC_TIME_FILE", phcTimeFile)
+			t.Setenv("PHC_CTL_LOG", phcLogFile)
+
+			profile := selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth0"})
+			if err := updatePHC("test-profile", profile, []string{"eth0"}, "/dev/ptp0", 0); err != nil {
+				t.Fatalf("updatePHC() error: %v", err)
+			}
+			got, err := os.ReadFile(phcLogFile)
+			if err != nil {
+				t.Fatalf("read PHC command log: %v", err)
+			}
+			if string(got) != test.wantLog {
+				t.Fatalf("PHC commands = %q, want %q", got, test.wantLog)
+			}
+			count, err := os.ReadFile(countFile)
+			if err != nil {
+				t.Fatalf("read ptp4l invocation count: %v", err)
+			}
+			if string(count) != "2\n" {
+				t.Fatalf("ptp4l invocation count = %q, want %q", count, "2\n")
+			}
+		})
+	}
+}
+
 // TestOnPTPConfigChangePHCCommandFailuresAndCompletion covers PHC get/set failures and success without read-back.
 func TestOnPTPConfigChangePHCCommandFailuresAndCompletion(t *testing.T) {
 	tests := []struct {
