@@ -6,8 +6,9 @@ The operator enables the plugin by default, but a profile runs it only when
 its `plugins` map contains `phc-first-step`.
 
 The plugin identifies each TR interface from a `ptp4lConf` interface section
-with `masterOnly 0`. Every selected interface must also be listed in the same
-profile's `e825.devices`, and all interfaces must resolve to one PHC. The
+with `masterOnly 0`. All selected interfaces must resolve to one PHC, and at
+least one device in the same profile's `e825.devices` must expose that PHC. Its
+name may differ from the TR interface name. The
 plugin runs free-running `ptp4l`, collects the first 16 valid master-offset
 samples with non-zero path delay, and averages them. It then reads the shared
 PHC and sets it to the current PHC time minus the mean offset. A successful

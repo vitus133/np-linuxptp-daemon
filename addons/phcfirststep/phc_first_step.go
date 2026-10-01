@@ -51,15 +51,15 @@ func onPTPConfigChange(_ *interface{}, profile *ptpv1.PtpProfile) error {
 	if len(ifaces) == 0 {
 		return logFailure(profile, fmt.Errorf("profile %s has no TR interfaces with masterOnly 0", name))
 	}
-	if err := validateE825Devices(profile, ifaces); err != nil {
-		return logFailure(profile, err)
-	}
 	timeout, err := measurementTimeout(profile)
 	if err != nil {
 		return logFailure(profile, err)
 	}
 	phc, err := sharedPHC(ifaces)
 	if err != nil {
+		return logFailure(profile, err)
+	}
+	if err := validateE825PHC(profile, phc); err != nil {
 		return logFailure(profile, err)
 	}
 	glog.Infof("phc-first-step resolved: profile=%s interfaces=%v PHC=%s", name, ifaces, phc)
@@ -102,13 +102,13 @@ func timeReceiverInterfaces(profile *ptpv1.PtpProfile) []string {
 	return interfaces
 }
 
-func validateE825Devices(profile *ptpv1.PtpProfile, interfaces []string) error {
+func validateE825PHC(profile *ptpv1.PtpProfile, trPHC string) error {
 	if profile == nil || profile.Plugins == nil {
-		return fmt.Errorf("profile has no e825 plugin configuration for TR interfaces %v", interfaces)
+		return fmt.Errorf("profile has no e825 plugin configuration for TR PHC %s", trPHC)
 	}
 	raw, ok := profile.Plugins["e825"]
 	if !ok || raw == nil {
-		return fmt.Errorf("profile e825 plugin configuration is required for TR interfaces %v", interfaces)
+		return fmt.Errorf("profile e825 plugin configuration is required for TR PHC %s", trPHC)
 	}
 	var opts struct {
 		Devices []string `json:"devices"`
@@ -116,16 +116,12 @@ func validateE825Devices(profile *ptpv1.PtpProfile, interfaces []string) error {
 	if err := json.Unmarshal(raw.Raw, &opts); err != nil {
 		return fmt.Errorf("decode e825 devices for profile %s: %w", profileName(profile), err)
 	}
-	devices := make(map[string]bool, len(opts.Devices))
 	for _, device := range opts.Devices {
-		devices[device] = true
-	}
-	for _, iface := range interfaces {
-		if !devices[iface] {
-			return fmt.Errorf("TR interface %q is not listed in profile e825.devices", iface)
+		if phcIDForIface(device) == trPHC {
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("no profile e825.devices entry exposes the TR PHC %s", trPHC)
 }
 
 func sharedPHC(interfaces []string) (string, error) {

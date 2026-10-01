@@ -61,37 +61,45 @@ func TestTimeReceiverInterfaces(t *testing.T) {
 	}
 }
 
-// TestValidateE825Devices covers matching TR devices, missing e825 configuration, and device mismatch.
-func TestValidateE825Devices(t *testing.T) {
+// TestValidateE825PHC covers direct and aliased device matches, missing e825 configuration,
+// and e825 devices exposing a different PHC.
+func TestValidateE825PHC(t *testing.T) {
+	old := phcIDForIface
+	t.Cleanup(func() { phcIDForIface = old })
 	tests := []struct {
-		name       string
-		profile    *ptpv1.PtpProfile
-		interfaces []string
-		wantErr    bool
+		name    string
+		profile *ptpv1.PtpProfile
+		phcs    map[string]string
+		wantErr bool
 	}{
 		{
-			name:       "all TR interfaces configured",
-			profile:    selectedProfile(t, "[eth0]\nmasterOnly 0\n[eth1]\nmasterOnly 0\n", "", []string{"eth0", "eth1", "eth2"}),
-			interfaces: []string{"eth0", "eth1"},
+			name:    "e825 device exposes the TR PHC",
+			profile: selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth0"}),
+			phcs:    map[string]string{"eth0": "/dev/ptp0"},
 		},
 		{
-			name:       "missing e825 configuration",
-			profile:    profileWithPlugins("[eth0]\nmasterOnly 0\n", map[string]*apiextensions.JSON{pluginName: {Raw: []byte(`{}`)}}),
-			interfaces: []string{"eth0"},
-			wantErr:    true,
+			name:    "different interface name exposes the same PHC",
+			profile: selectedProfile(t, "[eno8303]\nmasterOnly 0\n", "", []string{"eno8703"}),
+			phcs:    map[string]string{"eno8303": "/dev/ptp0", "eno8703": "/dev/ptp0"},
 		},
 		{
-			name:       "TR interface absent from e825 devices",
-			profile:    selectedProfile(t, "[eth0]\nmasterOnly 0\n[eth1]\nmasterOnly 0\n", "", []string{"eth0"}),
-			interfaces: []string{"eth0", "eth1"},
-			wantErr:    true,
+			name:    "missing e825 configuration",
+			profile: profileWithPlugins("[eth0]\nmasterOnly 0\n", map[string]*apiextensions.JSON{pluginName: {Raw: []byte(`{}`)}}),
+			wantErr: true,
+		},
+		{
+			name:    "e825 devices expose another PHC",
+			profile: selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth1"}),
+			phcs:    map[string]string{"eth0": "/dev/ptp0", "eth1": "/dev/ptp1"},
+			wantErr: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateE825Devices(test.profile, test.interfaces)
+			phcIDForIface = func(iface string) string { return test.phcs[iface] }
+			err := validateE825PHC(test.profile, "/dev/ptp0")
 			if (err != nil) != test.wantErr {
-				t.Fatalf("validateE825Devices() error = %v, wantErr %v", err, test.wantErr)
+				t.Fatalf("validateE825PHC() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
 	}
@@ -217,8 +225,14 @@ func TestOnPTPConfigChangeValidationDoesNotRunCommands(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "e825 device mismatch",
+			name:    "e825 device exposes another PHC",
 			profile: selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth1"}),
+			resolver: func(iface string) string {
+				if iface == "eth0" {
+					return "/dev/ptp0"
+				}
+				return "/dev/ptp1"
+			},
 			wantErr: true,
 		},
 		{
@@ -278,8 +292,16 @@ func TestOnPTPConfigChangeMeasuresAndSetsSharedPHC(t *testing.T) {
 	old := phcIDForIface
 	phcIDForIface = func(string) string { return "/dev/ptp0" }
 	t.Cleanup(func() { phcIDForIface = old })
-	conf := "[global]\ndomainNumber 24\n[eth0]\nmasterOnly 0\n[eth1]\nmasterOnly 0\n"
-	profile := selectedProfile(t, conf, "", []string{"eth0", "eth1"})
+	conf := "[global]\ndomainNumber 24\n[eno8303]\nmasterOnly 0\n[eno8304]\nmasterOnly 0\n"
+	profile := selectedProfile(t, conf, "", []string{"eno8703"})
+	phcIDForIface = func(iface string) string {
+		switch iface {
+		case "eno8303", "eno8304", "eno8703":
+			return "/dev/ptp0"
+		default:
+			return ""
+		}
+	}
 	if err := onPTPConfigChange(nil, profile); err != nil {
 		t.Fatalf("onPTPConfigChange() error: %v", err)
 	}
