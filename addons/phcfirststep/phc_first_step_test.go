@@ -306,7 +306,7 @@ func TestOnPTPConfigChangeValidationDoesNotRunCommands(t *testing.T) {
 	}
 }
 
-// TestOnPTPConfigChangeMeasuresAndSetsSharedPHC covers zero-delay filtering, first-16 averaging,
+// TestOnPTPConfigChangeMeasuresAndSetsSharedPHC covers zero-delay filtering, latest-offset selection,
 // corrected-time calculation, shared-PHC selection, and waiting for phc_ctl set to finish.
 func TestOnPTPConfigChangeMeasuresAndSetsSharedPHC(t *testing.T) {
 	var samples strings.Builder
@@ -345,7 +345,7 @@ func TestOnPTPConfigChangeMeasuresAndSetsSharedPHC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read PHC command log: %v", err)
 	}
-	if want := "get\nset 99.999999992\n"; string(got) != want {
+	if want := "get\nset 99.999999984\n"; string(got) != want {
 		t.Fatalf("PHC commands = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(complete); err != nil {
@@ -368,7 +368,7 @@ func TestMeasureOffsetRequiresAllSamplesAndCleansUpOnTimeout(t *testing.T) {
 			t.Fatalf("measureOffset() error: %v", err)
 		}
 		if got != 4 {
-			t.Fatalf("mean offset = %d, want 4", got)
+			t.Fatalf("latest offset = %d, want 4", got)
 		}
 		if time.Since(start) < 150*time.Millisecond {
 			t.Fatal("measurement returned before ptp4l produced valid samples")
@@ -422,10 +422,12 @@ func TestMeasureOffsetRequiresAllSamplesAndCleansUpOnTimeout(t *testing.T) {
 	})
 }
 
-func TestMeasureOffsetDoesNotOverflowAveraging(t *testing.T) {
+func TestMeasureOffsetUsesLatestSample(t *testing.T) {
 	ptp4l := "#!/bin/sh\n" +
 		"i=0\nwhile [ \"$i\" -lt 16 ]; do\n" +
-		"  printf 'master offset -1790873630319811923 s0 freq +1 path delay 10\\n'\n" +
+		"  offset=-1790873630319811923\n" +
+		"  if [ \"$i\" -eq 15 ]; then offset=-1790873630317800000; fi\n" +
+		"  printf 'master offset %s s0 freq +1 path delay 10\\n' \"$offset\"\n" +
 		"  i=$((i + 1))\ndone\n"
 	installFakeCommands(t, ptp4l, "")
 	profile := selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth0"})
@@ -434,8 +436,8 @@ func TestMeasureOffsetDoesNotOverflowAveraging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("measureOffset() error: %v", err)
 	}
-	if want := int64(-1790873630319811923); got != want {
-		t.Fatalf("mean offset = %d, want %d", got, want)
+	if want := int64(-1790873630317800000); got != want {
+		t.Fatalf("latest offset = %d, want %d", got, want)
 	}
 }
 

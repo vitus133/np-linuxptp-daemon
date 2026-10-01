@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"os"
 	"os/exec"
 	"regexp"
@@ -188,7 +187,7 @@ func updatePHC(name string, profile *ptpv1.PtpProfile, interfaces []string, phc 
 	if err != nil {
 		return fmt.Errorf("measure PHC offset for interfaces %v: %w", interfaces, err)
 	}
-	glog.Infof("phc-first-step measurement complete: profile=%s interfaces=%v PHC=%s samples=%d meanOffset=%d ns", name, interfaces, phc, measurementSamples, offset)
+	glog.Infof("phc-first-step measurement complete: profile=%s interfaces=%v PHC=%s samples=%d latestOffset=%d ns", name, interfaces, phc, measurementSamples, offset)
 	phcTime, err := readPHCTime(context.Background(), phc)
 	if err != nil {
 		return fmt.Errorf("read PHC %s: %w", phc, err)
@@ -256,12 +255,7 @@ func measureOffset(ctx context.Context, profile *ptpv1.PtpProfile, interfaces []
 		return 0, fmt.Errorf("ptp4l exited after %d of %d valid offset samples", len(samples), measurementSamples)
 	}
 
-	var total big.Int
-	for _, sample := range samples {
-		total.Add(&total, big.NewInt(sample))
-	}
-	total.Quo(&total, big.NewInt(measurementSamples))
-	return total.Int64(), nil
+	return samples[len(samples)-1], nil
 }
 
 func renderMeasurementConfig(profile *ptpv1.PtpProfile, interfaces []string) (string, error) {
