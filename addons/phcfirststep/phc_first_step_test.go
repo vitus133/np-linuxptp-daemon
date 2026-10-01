@@ -205,6 +205,42 @@ func TestRenderMeasurementConfig(t *testing.T) {
 	}
 }
 
+func TestSetPHCTimeNegativeValue(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "phc-ctl-args")
+	phcCtl := "#!/bin/sh\n" +
+		"if [ \"$2\" != \"--\" ]; then echo 'missing phc_ctl command separator' >&2; exit 2; fi\n" +
+		"printf '%s\\n' \"$@\" > \"$PHC_CTL_ARGS\"\n" +
+		"[ \"$3\" = set ] && [ \"$4\" = -515051308.470896042 ]\n"
+	installFakeCommands(t, "", phcCtl)
+	t.Setenv("PHC_CTL_ARGS", argsFile)
+
+	if err := setPHCTime(context.Background(), "/dev/ptp0", -515051307529103958); err != nil {
+		t.Fatalf("setPHCTime() error: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read phc_ctl arguments: %v", err)
+	}
+	if want := "/dev/ptp0\n--\nset\n-515051308.470896042\n"; string(got) != want {
+		t.Fatalf("phc_ctl arguments = %q, want %q", got, want)
+	}
+}
+
+func TestReadPHCTimeNegativeValue(t *testing.T) {
+	phcCtl := "#!/bin/sh\n" +
+		"[ \"$2\" = -- ] && [ \"$3\" = get ] || exit 2\n" +
+		"echo 'clock time is -515051308.470896042'\n"
+	installFakeCommands(t, "", phcCtl)
+
+	got, err := readPHCTime(context.Background(), "/dev/ptp0")
+	if err != nil {
+		t.Fatalf("readPHCTime() error: %v", err)
+	}
+	if want := int64(-515051307529103958); got != want {
+		t.Fatalf("readPHCTime() = %d, want %d", got, want)
+	}
+}
+
 // TestOnPTPConfigChangeValidationDoesNotRunCommands covers missing TR ports, e825 mismatch, unresolved PHC,
 // and multiple PHCs, confirming validation fails before external commands run.
 func TestOnPTPConfigChangeValidationDoesNotRunCommands(t *testing.T) {
@@ -279,9 +315,9 @@ func TestOnPTPConfigChangeMeasuresAndSetsSharedPHC(t *testing.T) {
 	samples.WriteString("  printf 'ptp4l: master offset %s s0 freq +0 path delay 80\\n' \"$i\"\n")
 	samples.WriteString("  i=$((i + 1))\ndone\n")
 	samples.WriteString("printf 'ptp4l: master offset 100000 s0 freq +0 path delay 80\\n'\n")
-	phcCtl := "#!/bin/sh\ncase \"$2\" in\n" +
+	phcCtl := "#!/bin/sh\n[ \"$2\" = -- ] || exit 2\ncase \"$3\" in\n" +
 		"get) echo get >> \"$PHC_CTL_LOG\"; echo 'clock time is 100.000000000' ;;\n" +
-		"set) echo \"set $3\" >> \"$PHC_CTL_LOG\"; sleep 0.1; touch \"$PHC_SET_COMPLETE\" ;;\n" +
+		"set) echo \"set $4\" >> \"$PHC_CTL_LOG\"; sleep 0.1; touch \"$PHC_SET_COMPLETE\" ;;\n" +
 		"*) exit 2 ;;\nesac\n"
 	installFakeCommands(t, "#!/bin/sh\n"+samples.String(), phcCtl)
 	log := filepath.Join(t.TempDir(), "phc-ctl.log")
@@ -401,9 +437,9 @@ func TestOnPTPConfigChangePHCCommandFailuresAndCompletion(t *testing.T) {
 	var samples strings.Builder
 	samples.WriteString("i=1\nwhile [ \"$i\" -le 16 ]; do\n")
 	samples.WriteString("  printf 'master offset 8 s0 freq +0 path delay 10\\n'\n  i=$((i + 1))\ndone\n")
-	phcCtl := "#!/bin/sh\ncase \"$2\" in\n" +
+	phcCtl := "#!/bin/sh\n[ \"$2\" = -- ] || exit 2\ncase \"$3\" in\n" +
 		"get) echo get >> \"$PHC_CTL_LOG\"; if [ \"$PHC_FAIL\" = get ]; then exit 1; fi; echo 'clock time is 100.000000000' ;;\n" +
-		"set) echo \"set $3\" >> \"$PHC_CTL_LOG\"; if [ \"$PHC_FAIL\" = set ]; then exit 1; fi ;;\nesac\n"
+		"set) echo \"set $4\" >> \"$PHC_CTL_LOG\"; if [ \"$PHC_FAIL\" = set ]; then exit 1; fi ;;\nesac\n"
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			installFakeCommands(t, "#!/bin/sh\n"+samples.String(), phcCtl)

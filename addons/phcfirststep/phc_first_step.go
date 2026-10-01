@@ -32,7 +32,7 @@ type pluginOptions struct {
 }
 
 var (
-	clockTimePattern = regexp.MustCompile(`clock time is\s+([0-9]+(?:\.[0-9]+)?)`)
+	clockTimePattern = regexp.MustCompile(`clock time is\s+([+-]?[0-9]+(?:\.[0-9]+)?)`)
 	masterOffsetRE   = regexp.MustCompile(`master offset\s+([+-]?\d+)\s+s\d+\s+freq\s+[+-]?\d+\s+path delay\s+[+-]?0*[1-9]\d*`)
 	phcIDForIface    = network.GetPhcId
 )
@@ -334,7 +334,7 @@ func renderMeasurementConfig(profile *ptpv1.PtpProfile, interfaces []string) (st
 }
 
 func readPHCTime(ctx context.Context, phc string) (int64, error) {
-	out, err := commandOutput(ctx, "phc_ctl", phc, "get")
+	out, err := commandOutput(ctx, "phc_ctl", phc, "--", "get")
 	if err != nil {
 		return 0, err
 	}
@@ -346,7 +346,7 @@ func readPHCTime(ctx context.Context, phc string) (int64, error) {
 }
 
 func setPHCTime(ctx context.Context, phc string, value int64) error {
-	_, err := commandOutput(ctx, "phc_ctl", phc, "set", formatNS(value))
+	_, err := commandOutput(ctx, "phc_ctl", phc, "--", "set", formatNS(value))
 	return err
 }
 
@@ -372,11 +372,20 @@ func phcSecondsToNS(value string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if seconds > math.MaxInt64/nanosecondsPerSecond || seconds < math.MinInt64/nanosecondsPerSecond {
+	minSeconds := math.MinInt64 / nanosecondsPerSecond
+	maxSeconds := math.MaxInt64 / nanosecondsPerSecond
+	if seconds < minSeconds-1 || seconds > maxSeconds {
 		return 0, fmt.Errorf("PHC time %q overflows nanoseconds", value)
 	}
+	if seconds == minSeconds-1 {
+		minNanoseconds := nanosecondsPerSecond + math.MinInt64%nanosecondsPerSecond
+		if nanoseconds < minNanoseconds {
+			return 0, fmt.Errorf("PHC time %q overflows nanoseconds", value)
+		}
+		return math.MinInt64 + nanoseconds - minNanoseconds, nil
+	}
 	base := seconds * nanosecondsPerSecond
-	if nanoseconds > math.MaxInt64-base {
+	if base > math.MaxInt64-nanoseconds {
 		return 0, fmt.Errorf("PHC time %q overflows nanoseconds", value)
 	}
 	return base + nanoseconds, nil
