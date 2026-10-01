@@ -932,6 +932,12 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	if test {
 		configPrefix = testDir
 	}
+	profilePlugins := make([]string, 0, len(nodeProfile.Plugins))
+	for name := range nodeProfile.Plugins {
+		profilePlugins = append(profilePlugins, name)
+	}
+	slices.Sort(profilePlugins)
+	glog.Infof("Profile %s requests hardware plugins: %v", *nodeProfile.Name, profilePlugins)
 	var pluginErrors []error
 
 	// Validate that all plugin names in the profile match registered plugins
