@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"os/exec"
 	"regexp"
@@ -253,11 +254,12 @@ func measureOffset(ctx context.Context, profile *ptpv1.PtpProfile, interfaces []
 		return 0, fmt.Errorf("ptp4l exited after %d of %d valid offset samples", len(samples), measurementSamples)
 	}
 
-	var total int64
+	var total big.Int
 	for _, sample := range samples {
-		total += sample
+		total.Add(&total, big.NewInt(sample))
 	}
-	return total / measurementSamples, nil
+	total.Quo(&total, big.NewInt(measurementSamples))
+	return total.Int64(), nil
 }
 
 func renderMeasurementConfig(profile *ptpv1.PtpProfile, interfaces []string) (string, error) {

@@ -422,6 +422,23 @@ func TestMeasureOffsetRequiresAllSamplesAndCleansUpOnTimeout(t *testing.T) {
 	})
 }
 
+func TestMeasureOffsetDoesNotOverflowAveraging(t *testing.T) {
+	ptp4l := "#!/bin/sh\n" +
+		"i=0\nwhile [ \"$i\" -lt 16 ]; do\n" +
+		"  printf 'master offset -1790873630319811923 s0 freq +1 path delay 10\\n'\n" +
+		"  i=$((i + 1))\ndone\n"
+	installFakeCommands(t, ptp4l, "")
+	profile := selectedProfile(t, "[eth0]\nmasterOnly 0\n", "", []string{"eth0"})
+
+	got, err := measureOffset(context.Background(), profile, []string{"eth0"}, 0)
+	if err != nil {
+		t.Fatalf("measureOffset() error: %v", err)
+	}
+	if want := int64(-1790873630319811923); got != want {
+		t.Fatalf("mean offset = %d, want %d", got, want)
+	}
+}
+
 // TestOnPTPConfigChangePHCCommandFailuresAndCompletion covers PHC get/set failures and success without read-back.
 func TestOnPTPConfigChangePHCCommandFailuresAndCompletion(t *testing.T) {
 	tests := []struct {
