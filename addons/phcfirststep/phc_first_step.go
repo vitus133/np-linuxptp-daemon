@@ -188,6 +188,7 @@ func updatePHC(name string, profile *ptpv1.PtpProfile, interfaces []string, phc 
 	if err != nil {
 		return fmt.Errorf("measure PHC offset for interfaces %v: %w", interfaces, err)
 	}
+	glog.Infof("phc-first-step measurement complete: profile=%s interfaces=%v PHC=%s samples=%d meanOffset=%d ns", name, interfaces, phc, measurementSamples, offset)
 	phcTime, err := readPHCTime(context.Background(), phc)
 	if err != nil {
 		return fmt.Errorf("read PHC %s: %w", phc, err)
@@ -196,6 +197,7 @@ func updatePHC(name string, profile *ptpv1.PtpProfile, interfaces []string, phc 
 	if err != nil {
 		return fmt.Errorf("calculate corrected PHC time for %s: %w", phc, err)
 	}
+	glog.Infof("phc-first-step correction calculated: profile=%s PHC=%s currentPHC=%d ns targetPHC=%d ns", name, phc, phcTime, corrected)
 	if err := setPHCTime(context.Background(), phc, corrected); err != nil {
 		return fmt.Errorf("set PHC %s: %w", phc, err)
 	}
