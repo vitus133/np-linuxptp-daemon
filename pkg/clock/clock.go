@@ -16,6 +16,8 @@ type OffsetSample struct {
 
 // Clock represents a PTP clock instance tied to a specific config profile.
 type Clock interface {
+	// AddEvent handles ordinary events; GM/TBC also handle ts2phc run boundaries.
+	// Raw ts2phc observations go through the clock manager for reporting.
 	AddEvent(ev event.Event) SyncState
 	GetState() event.PTPState
 	SystemClockUpdate()

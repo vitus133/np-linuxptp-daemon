@@ -26,6 +26,7 @@ type GM struct {
 	announcedClockClass    fbprotocol.ClockClass
 	announcedClockAccuracy fbprotocol.ClockAccuracy
 	lastLoggedState        event.PTPState
+	ts2phc                 ts2phcTracker
 }
 
 // NewGM creates a new grandmaster clock
@@ -70,6 +71,7 @@ func (c *GM) GetState() event.PTPState { return c.syncState.State }
 // Reset resets the clock state.
 func (c *GM) Reset() {
 	c.BaseClock.Reset()
+	c.ts2phc.reset()
 
 	c.syncState = SyncState{}
 	c.overallSyncState = event.PTP_FREERUN
@@ -82,17 +84,39 @@ func (c *GM) Reset() {
 
 // AddEvent processes an event and updates clock state.
 func (c *GM) AddEvent(ev event.Event) SyncState {
+	if _, ok := ev.Data.(*event.TS2PHCRunStarted); ok {
+		return c.StartTS2PHCRun(ev)
+	}
+	if _, ok := ev.Data.(*event.TS2PHCObservation); ok {
+		// Raw observations must go through the clock manager so their evaluated
+		// events are also available for logging and metrics.
+		return c.syncState
+	}
 	if ev.Source == event.PMC {
 		return c.syncState
 	}
 
+	d := c.recordEvent(ev)
+	clockState := c.evaluateEvent(ev)
+	c.reportEvent(ev, d, clockState)
+	return clockState
+}
+
+func (c *GM) recordEvent(ev event.Event) *event.Data {
 	d := c.GetData(ev.Source)
 	d.AddEvent(ev)
 	d.UpdateState()
+	return d
+}
+
+func (c *GM) evaluateEvent(ev event.Event) SyncState {
 	clockState := c.updateState()
 	emitOverallSyncStateIfChanged(c.sendIPC, &c.overallSyncState, c.syncState.State, c.osClock.State, c.cfgName)
 	c.announceClockClassIfChanged(ev, clockState)
+	return clockState
+}
 
+func (c *GM) reportEvent(ev event.Event, d *event.Data, clockState SyncState) {
 	// Zero NMEA status when GM is not locked
 	if clockState.State != event.PTP_LOCKED {
 		if od, ok := ev.Data.(*event.OffsetData); ok && od.NMEALocked != nil {
@@ -121,8 +145,60 @@ func (c *GM) AddEvent(ev event.Event) SyncState {
 		}
 	}
 	debug.UpdateGMState(string(clockState.State))
+}
 
-	return clockState
+// ConfigureTS2PHC installs the resolved profile configuration during setup,
+// before processes start. It does not depend on live process observations.
+func (c *GM) ConfigureTS2PHC(config event.TS2PHCConfig) {
+	c.ts2phc.configure(config)
+}
+
+// StartTS2PHCRun clears only ts2phc measurements and partial poll tracking.
+func (c *GM) StartTS2PHCRun(ev event.Event) SyncState {
+	if ev.Source != event.TS2PHC {
+		return c.syncState
+	}
+	if c.ts2phc.startRun(&c.DataHolder) {
+		state := c.updateState()
+		emitOverallSyncStateIfChanged(c.sendIPC, &c.overallSyncState, state.State, c.osClock.State, c.cfgName)
+		c.announceClockClassIfChanged(ev, state)
+	}
+	return c.syncState
+}
+
+// ObserveTS2PHC updates tracking and filters process facts using GM policy. It
+// does not change stored process data or evaluate the clock's sync state. The
+// GNSS-disciplined leading PHC remains a sink in all modes.
+func (c *GM) ObserveTS2PHC(ev event.Event, observation *event.TS2PHCObservation) TS2PHCUpdate {
+	if ev.Source != event.TS2PHC || observation == nil {
+		return TS2PHCUpdate{}
+	}
+	if !c.ts2phc.prepare(observation) {
+		return TS2PHCUpdate{}
+	}
+	return c.ts2phc.observe(ev, observation, ts2phcPolicy{pollTimeouts: true})
+}
+
+// ApplyTS2PHC records the filtered events and removes inactive data before
+// evaluating and publishing the final clock state for the observation.
+func (c *GM) ApplyTS2PHC(update TS2PHCUpdate) SyncState {
+	changed := c.discardInactiveTS2PHC(&c.ts2phc, update.inactivePHCs)
+	for _, evaluated := range update.Events {
+		c.recordEvent(evaluated)
+	}
+	if !changed && len(update.Events) == 0 {
+		return c.syncState
+	}
+	clockState := c.evaluateEvent(update.trigger)
+	for _, evaluated := range update.Events {
+		c.reportEvent(evaluated, c.GetData(evaluated.Source), clockState)
+	}
+	return c.syncState
+}
+
+// TS2PHCOffsetInterfaces returns the sinks whose offset measurements are expected.
+func (c *GM) TS2PHCOffsetInterfaces() []string {
+	return c.ts2phc.offsetInterfaces(ts2phcPolicy{pollTimeouts: true})
 }
 
 func (c *GM) announceClockClassIfChanged(ev event.Event, clockState SyncState) {
@@ -181,6 +257,14 @@ func (c *GM) getLeadingInterface() string {
 					return dd.IFace
 				}
 			}
+		}
+	}
+	if c.ts2phc.config.LeadingInterface != "" {
+		return c.ts2phc.config.LeadingInterface
+	}
+	for _, iface := range c.ts2phc.config.Interfaces {
+		if iface.Source == event.GNSS {
+			return iface.Name
 		}
 	}
 	return event.LEADING_INTERFACE_UNKNOWN

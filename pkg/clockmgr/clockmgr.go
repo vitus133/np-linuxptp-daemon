@@ -3,6 +3,7 @@ package clockmgr
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,9 +26,9 @@ import (
 const (
 	configLabel  = "config"
 	fromLabel    = "from"
-	ifaceLabel   = "iface"
 	nodeLabel    = "node"
 	processLabel = "process"
+	ifaceLabel   = "iface"
 )
 
 // ClockManager ... event handler to process events
@@ -55,6 +56,9 @@ type ClockManager struct {
 	// are replaced so a slow consumer cannot block clock processing.
 	statsUpdates   chan process.EventStats
 	osClockConfigs map[string]struct{}
+	// Per-clock ts2phc state labels follow accepted details, including removal
+	// when a PHC stops being monitored. Raw observations never create gauges.
+	ts2phcStateIfaces map[string]map[string]struct{}
 }
 
 // ConfigureSourceQualification sets policy for the active upstream PTP input of
@@ -99,6 +103,31 @@ type metricEntry struct {
 // without adding config-specific behavior to every Clock implementation.
 type clockConfigDataProvider interface {
 	ProcessDataForConfig(cfgName string) []*event.Data
+}
+
+// ts2phcObserver filters process facts and applies the resulting update on the
+// clock loop. Only accepted events are used for logging and metrics. Its clock
+// must handle TS2PHCRunStarted through AddEvent.
+type ts2phcObserver interface {
+	ObserveTS2PHC(event.Event, *event.TS2PHCObservation) clock.TS2PHCUpdate
+	ApplyTS2PHC(clock.TS2PHCUpdate) clock.SyncState
+	ConfigureTS2PHC(event.TS2PHCConfig)
+	TS2PHCOffsetInterfaces() []string
+}
+
+// ConfigureTS2PHC installs the already-rendered process configuration during
+// profile setup, before processes start. Runtime events never carry configuration.
+func (m *ClockManager) ConfigureTS2PHC(configName string, config event.TS2PHCConfig) error {
+	m.clockManagementMu.Lock()
+	defer m.clockManagementMu.Unlock()
+	clk := m.GetClock(configName)
+	observer, ok := clk.(ts2phcObserver)
+	if !ok {
+		return fmt.Errorf("ts2phc configuration requires a GM or T-BC clock for %s", configName)
+	}
+	observer.ConfigureTS2PHC(config)
+	m.syncTS2PHCOffsetMetrics(configName, observer, true)
+	return nil
 }
 
 // SetHAMetric injects the openshift_ptp_ha_profile_status gauge. It is set
@@ -167,19 +196,20 @@ func (m *ClockManager) publishStats() {
 // Init ... initialize event manager
 func Init(nodeName string, processChannel chan event.Event, offsetMetric *prometheus.GaugeVec, clockMetric *prometheus.GaugeVec, clockClassMetric *prometheus.GaugeVec, ipcCache *ipc.Cache) *ClockManager {
 	m := &ClockManager{
-		nodeName:         nodeName,
-		events:           processChannel,
-		metricCache:      map[metricKey]metricEntry{},
-		registeredGauges: map[string]*prometheus.GaugeVec{},
-		clockMetric:      clockMetric,
-		offsetMetric:     offsetMetric,
-		clockClassMetric: clockClassMetric,
-		clocks:           map[string]clock.Clock{},
-		osClock:          clock.OsClock{State: event.PTP_FREERUN, E3State: event.PTP_NOTSET, IFace: parserconstants.ClockRealTime},
-		ipcCache:         ipcCache,
-		syncStatusCh:     make(chan struct{}, 1),
-		statsUpdates:     make(chan process.EventStats, 1),
-		osClockConfigs:   make(map[string]struct{}),
+		nodeName:          nodeName,
+		events:            processChannel,
+		metricCache:       map[metricKey]metricEntry{},
+		registeredGauges:  map[string]*prometheus.GaugeVec{},
+		clockMetric:       clockMetric,
+		offsetMetric:      offsetMetric,
+		clockClassMetric:  clockClassMetric,
+		clocks:            map[string]clock.Clock{},
+		osClock:           clock.OsClock{State: event.PTP_FREERUN, E3State: event.PTP_NOTSET, IFace: parserconstants.ClockRealTime},
+		ipcCache:          ipcCache,
+		syncStatusCh:      make(chan struct{}, 1),
+		statsUpdates:      make(chan process.EventStats, 1),
+		osClockConfigs:    make(map[string]struct{}),
+		ts2phcStateIfaces: make(map[string]map[string]struct{}),
 	}
 	m.publishStats()
 	return m
@@ -270,6 +300,9 @@ func (m *ClockManager) RemoveAllClocks() {
 
 	for cfgName := range m.clocks {
 		m.unregisterMetrics(cfgName, "")
+	}
+	for cfgName := range m.ts2phcStateIfaces {
+		m.clearTS2PHCStateMetrics(cfgName)
 	}
 	m.clocks = map[string]clock.Clock{}
 	m.osClockConfigs = make(map[string]struct{})
@@ -428,17 +461,43 @@ func (m *ClockManager) ProcessEvent(ev event.Event) {
 		return
 	}
 
-	if clk.ClockType() == event.TBC && m.IsApplying() {
-		return
-	}
-
-	if ev.WriteToLog {
-		if logData := ev.GetLogData(); logData != "" {
-			fmt.Printf("%s", logData)
+	prevState := clk.GetState()
+	var clockState clock.SyncState
+	evaluatedEvents := []event.Event{ev}
+	if _, started := ev.Data.(*event.TS2PHCRunStarted); started {
+		observer, accepts := clk.(ts2phcObserver)
+		if !accepts || ev.Source != event.TS2PHC {
+			return
+		}
+		// The explicit run boundary must survive the T-BC apply filter so an
+		// old partial batch cannot be paired with the new process's samples.
+		clockState = clk.AddEvent(ev)
+		m.syncTS2PHCOffsetMetrics(lookupName, observer, true)
+		m.syncTS2PHCStateMetrics(clk)
+		evaluatedEvents = nil
+		if clk.ClockType() == event.TBC && m.IsApplying() {
+			m.publishStats()
+			return
+		}
+	} else {
+		if clk.ClockType() == event.TBC && m.IsApplying() {
+			return
+		}
+		if observation, ok := ev.Data.(*event.TS2PHCObservation); ok {
+			observer, accepts := clk.(ts2phcObserver)
+			if !accepts || ev.Source != event.TS2PHC {
+				return
+			}
+			// The manager retains the evaluated events for logging and metrics;
+			// AddEvent only handles ordinary events and the run boundary.
+			update := observer.ObserveTS2PHC(ev, observation)
+			clockState = observer.ApplyTS2PHC(update)
+			evaluatedEvents = update.Events
+			m.syncTS2PHCOffsetMetrics(lookupName, observer, false)
+		} else {
+			clockState = clk.AddEvent(ev)
 		}
 	}
-	prevState := clk.GetState()
-	clockState := clk.AddEvent(ev)
 	if prevState != event.PTP_NOTSET && prevState != clockState.State {
 		m.signalSyncStatus()
 	}
@@ -460,7 +519,17 @@ func (m *ClockManager) ProcessEvent(ev event.Event) {
 	// same class clk.ClockClass() would, so this is equivalent for them.
 	m.updateClockClassMetrics(lookupName, clockState.ClockClass)
 	m.updateHAProfileMetrics(clockState.HAProfileStatus)
-	m.updateMetrics(ev)
+	for _, evaluated := range evaluatedEvents {
+		if evaluated.WriteToLog {
+			if logData := evaluated.GetLogData(); logData != "" {
+				fmt.Printf("%s", logData)
+			}
+		}
+		m.updateMetrics(evaluated)
+	}
+	if ev.Source == event.TS2PHC {
+		m.syncTS2PHCStateMetrics(clk)
+	}
 	// A clock (E1) transition may move the derived E3 os_clock_state.
 	m.emitOSClockState()
 	m.publishStats()
@@ -487,6 +556,7 @@ func (m *ClockManager) reset(ev event.Event) {
 	if m.ipcCache != nil {
 		m.ipcCache.Clear()
 	}
+	var observer ts2phcObserver
 	if clk := m.GetClock(ev.CfgName); clk != nil {
 		if tbc, ok := clk.(*clock.TBC); ok {
 			tbc.ResetSource(ev.Source)
@@ -494,13 +564,105 @@ func (m *ClockManager) reset(ev event.Event) {
 			clk.Reset()
 		}
 		m.deleteClockOffsetMetrics(clk.ConfigName(), string(clk.ClockType()))
+		m.clearTS2PHCStateMetrics(clk.ConfigName())
+		observer, _ = clk.(ts2phcObserver)
 	}
 	m.osClock.E3State = event.PTP_NOTSET
 	if ev.Source == event.TS2PHC {
-		m.unregisterMetrics(ev.CfgName, "")
+		if observer == nil {
+			m.unregisterMetrics(ev.CfgName, "")
+			return
+		}
+		// Other source metrics retain their existing reset behavior. Expected
+		// ts2phc offset series remain present, but cannot retain old values.
+		for key, entry := range m.metricCache {
+			if key.cfgName == ev.CfgName && key.process != string(event.TS2PHC) {
+				m.deleteMetric(key, entry)
+			}
+		}
+		m.syncTS2PHCOffsetMetrics(ev.CfgName, observer, true)
 	} else {
 		m.unregisterMetrics(ev.CfgName, string(ev.Source))
 	}
+}
+
+// syncTS2PHCOffsetMetrics keeps expected measurement series present as NaN until
+// measured. A new run invalidates values without deleting/recreating its series;
+// removed or no-longer-monitored interfaces are deleted instead.
+func (m *ClockManager) syncTS2PHCOffsetMetrics(configName string, observer ts2phcObserver, newRun bool) {
+	expected := make(map[string]bool)
+	for _, iface := range observer.TS2PHCOffsetInterfaces() {
+		expected[alias.GetAlias(iface)] = true
+	}
+	for key, entry := range m.metricCache {
+		if key.cfgName != configName || key.process != string(event.TS2PHC) {
+			continue
+		}
+		if key.dataType == event.OFFSET && expected[key.iface] {
+			if newRun {
+				m.invalidateTS2PHCOffset(configName, key.iface)
+			}
+		} else if key.dataType == event.OFFSET || newRun {
+			m.deleteMetric(key, entry)
+		}
+	}
+	for iface := range expected {
+		key := metricKey{cfgName: configName, process: string(event.TS2PHC), iface: iface, dataType: event.OFFSET}
+		if _, exists := m.metricCache[key]; !exists {
+			m.invalidateTS2PHCOffset(configName, iface)
+		}
+	}
+}
+
+// invalidateTS2PHCOffset represents an unavailable measurement only at the
+// Prometheus boundary; NaN is never converted to an integer event offset.
+// iface is already normalized to its Prometheus alias by the caller.
+func (m *ClockManager) invalidateTS2PHCOffset(configName, iface string) {
+	if m.offsetMetric == nil || iface == "" {
+		return
+	}
+	labels := prometheus.Labels{fromLabel: "master", nodeLabel: m.nodeName, processLabel: string(event.TS2PHC), ifaceLabel: iface}
+	m.offsetMetric.With(labels).Set(math.NaN())
+	key := metricKey{cfgName: configName, process: string(event.TS2PHC), iface: iface, dataType: event.OFFSET}
+	m.metricCache[key] = metricEntry{gauge: m.offsetMetric, labels: labels}
+}
+
+func (m *ClockManager) syncTS2PHCStateMetrics(clk clock.Clock) {
+	if m.clockMetric == nil {
+		return
+	}
+	current := make(map[string]struct{})
+	for _, data := range clk.ProcessData() {
+		if data == nil || data.ProcessName != event.TS2PHC {
+			continue
+		}
+		for _, detail := range data.Details {
+			if detail.IFace == "" || (detail.State != event.PTP_LOCKED && detail.State != event.PTP_FREERUN && detail.State != event.PTP_HOLDOVER) {
+				continue
+			}
+			iface := alias.GetAlias(detail.IFace)
+			current[iface] = struct{}{}
+			m.updateClockStateMetrics(detail.State, string(event.TS2PHC), iface)
+		}
+	}
+	for iface := range m.ts2phcStateIfaces[clk.ConfigName()] {
+		if _, exists := current[iface]; !exists {
+			m.clockMetric.Delete(prometheus.Labels{processLabel: string(event.TS2PHC), nodeLabel: m.nodeName, ifaceLabel: iface})
+		}
+	}
+	if m.ts2phcStateIfaces == nil {
+		m.ts2phcStateIfaces = make(map[string]map[string]struct{})
+	}
+	m.ts2phcStateIfaces[clk.ConfigName()] = current
+}
+
+func (m *ClockManager) clearTS2PHCStateMetrics(configName string) {
+	if m.clockMetric != nil {
+		for iface := range m.ts2phcStateIfaces[configName] {
+			m.clockMetric.Delete(prometheus.Labels{processLabel: string(event.TS2PHC), nodeLabel: m.nodeName, ifaceLabel: iface})
+		}
+	}
+	delete(m.ts2phcStateIfaces, configName)
 }
 
 // updateClockStateMetrics should be used to update metrics when a clock changes state
@@ -653,6 +815,11 @@ func (m *ClockManager) updateMetrics(ev event.Event) {
 		if data.FrequencyStatus != nil {
 			processData[event.FREQUENCY_STATUS] = *data.FrequencyStatus
 		}
+	case *event.StateData:
+		if ev.Source == event.TS2PHC {
+			m.invalidateTS2PHCOffset(ev.CfgName, iface)
+		}
+		return
 	default:
 		return
 	}
@@ -721,12 +888,16 @@ func registerMetrics(m *prometheus.GaugeVec) {
 func (m *ClockManager) unregisterMetrics(configName string, processName string) {
 	for key, entry := range m.metricCache {
 		if key.cfgName == configName && (processName == "" || key.process == processName) {
-			if entry.gauge != nil {
-				entry.gauge.Delete(entry.labels)
-			}
-			delete(m.metricCache, key)
+			m.deleteMetric(key, entry)
 		}
 	}
+}
+
+func (m *ClockManager) deleteMetric(key metricKey, entry metricEntry) {
+	if entry.gauge != nil {
+		entry.gauge.Delete(entry.labels)
+	}
+	delete(m.metricCache, key)
 }
 
 func getMetricName(valueType event.ValueType) string {

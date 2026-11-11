@@ -91,6 +91,7 @@ type TBC struct {
 	ptpSource             *ptpSourceQualification
 	controlledPortsConfig string
 	isTTSC                bool
+	ts2phc                ts2phcTracker
 }
 
 // NewTBC creates a new Telecom Boundary clock
@@ -177,6 +178,14 @@ func (c *TBC) SourceQualification(cfg string) (event.SourceQualification, bool) 
 
 // AddEvent processes an event and updates clock state.
 func (c *TBC) AddEvent(ev event.Event) SyncState {
+	if _, ok := ev.Data.(*event.TS2PHCRunStarted); ok {
+		return c.StartTS2PHCRun(ev)
+	}
+	if _, ok := ev.Data.(*event.TS2PHCObservation); ok {
+		// Raw observations must go through the clock manager so their evaluated
+		// events are also available for logging and metrics.
+		return c.syncState
+	}
 	switch ev.Source {
 	case event.SYNCE:
 		c.processSyncE(ev)
@@ -191,13 +200,82 @@ func (c *TBC) AddEvent(ev event.Event) SyncState {
 		}
 		return c.syncState
 	default:
-		d := c.GetData(ev.Source)
-		d.AddEvent(ev)
-		d.UpdateState()
-		c.updateLeadingClockData(ev)
+		c.recordEvent(ev)
 		c.evaluateState()
 		return c.syncState
 	}
+}
+
+func (c *TBC) recordEvent(ev event.Event) {
+	d := c.GetData(ev.Source)
+	d.AddEvent(ev)
+	d.UpdateState()
+	c.updateLeadingClockData(ev)
+}
+
+// ConfigureTS2PHC installs the resolved profile configuration during setup,
+// before processes start. Explicitly configured leaders remain authoritative.
+func (c *TBC) ConfigureTS2PHC(config event.TS2PHCConfig) {
+	c.ts2phc.configure(config)
+	if c.configuredLeadingInterface != "" {
+		return
+	}
+	leading := config.LeadingInterface
+	if leading == "" {
+		for _, iface := range config.Interfaces {
+			if iface.Source == event.GNSS || iface.Source == event.PTP4l {
+				leading = iface.Name
+				break
+			}
+		}
+	}
+	c.SetConfiguredLeadingInterface(leading)
+}
+
+// StartTS2PHCRun clears only ts2phc measurements and partial poll tracking.
+// The next ordinary event evaluates the aggregate T-BC state; process startup
+// must not itself advance the FSM during profile apply.
+func (c *TBC) StartTS2PHCRun(ev event.Event) SyncState {
+	if ev.Source == event.TS2PHC {
+		c.ts2phc.startRun(&c.DataHolder)
+	}
+	return c.syncState
+}
+
+// ObserveTS2PHC updates tracking and filters facts using T-BC policy without
+// changing stored process data or evaluating the aggregate FSM.
+func (c *TBC) ObserveTS2PHC(ev event.Event, observation *event.TS2PHCObservation) TS2PHCUpdate {
+	if ev.Source != event.TS2PHC || observation == nil {
+		return TS2PHCUpdate{}
+	}
+	if !c.ts2phc.prepare(observation) {
+		return TS2PHCUpdate{}
+	}
+	return c.ts2phc.observe(ev, observation, c.ts2phcPolicy())
+}
+
+// ApplyTS2PHC records the filtered events and removes inactive data before
+// evaluating and publishing the final clock state for the observation.
+func (c *TBC) ApplyTS2PHC(update TS2PHCUpdate) SyncState {
+	changed := c.discardInactiveTS2PHC(&c.ts2phc, update.inactivePHCs)
+	for _, evaluated := range update.Events {
+		c.recordEvent(evaluated)
+	}
+	if changed || len(update.Events) > 0 {
+		c.evaluateState()
+	}
+	return c.syncState
+}
+
+// TS2PHCOffsetInterfaces returns the selected sinks whose offsets are expected.
+func (c *TBC) TS2PHCOffsetInterfaces() []string {
+	return c.ts2phc.offsetInterfaces(c.ts2phcPolicy())
+}
+
+func (c *TBC) ts2phcPolicy() ts2phcPolicy {
+	// Preserve the daemon's previous all-sink monitoring behavior in the
+	// refactor. T-BC-specific timeout policy is applied separately.
+	return ts2phcPolicy{pollTimeouts: true}
 }
 
 // ObserveSource evaluates a raw observation on the serialized clock loop. The
@@ -439,6 +517,7 @@ func (c *TBC) ResetSource(source event.EventSource) {
 
 func (c *TBC) resetAggregate() {
 	c.BaseClock.Reset()
+	c.ts2phc.reset()
 	c.leadingClockData = newLeadingClockParams()
 	c.syncState = SyncState{
 		State:         event.PTP_NOTSET,
