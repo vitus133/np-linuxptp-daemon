@@ -32,7 +32,7 @@ func newTS2PHCManagerTest(t *testing.T, clockType event.ClockType) (*ClockManage
 	}
 	require.NoError(t, err)
 	require.NoError(t, m.AddClock(c))
-	require.NoError(t, m.ConfigureTS2PHC("ts2phc.0.config", event.TS2PHCConfig{
+	require.NoError(t, m.ConfigureClock("ts2phc.0.config", event.TS2PHCConfig{
 		LeadingInterface: "ens0",
 		Interfaces: []event.TS2PHCInterface{
 			{Name: "ens0", PHCDevice: "/dev/ptp0", Source: event.PPS},
@@ -50,32 +50,42 @@ func ts2phcManagerObservation(clockType event.ClockType, iface string, data *eve
 
 type ts2phcEventRecorder struct {
 	clock.Clock
-	ts2phcObserver
 	added []event.Event
 }
 
-func (c *ts2phcEventRecorder) AddEvent(ev event.Event) clock.SyncState {
+func (c *ts2phcEventRecorder) AddEvent(ev event.Event) clock.EventResult {
 	c.added = append(c.added, ev)
 	return c.Clock.AddEvent(ev)
+}
+
+func (c *ts2phcEventRecorder) DuringApply(ev event.Event) (bool, bool) {
+	if policy, ok := c.Clock.(clock.ApplyingEventPolicy); ok {
+		return policy.DuringApply(ev)
+	}
+	return true, true
 }
 
 func TestTS2PHCManagerRoutesObservationsAndRunStart(t *testing.T) {
 	for _, clockType := range []event.ClockType{event.GM, event.TBC} {
 		t.Run(string(clockType), func(t *testing.T) {
 			m, c, _, _ := newTS2PHCManagerTest(t, clockType)
-			observer, ok := c.(ts2phcObserver)
-			require.True(t, ok)
-			recorder := &ts2phcEventRecorder{Clock: c, ts2phcObserver: observer}
+			recorder := &ts2phcEventRecorder{Clock: c}
 			require.NoError(t, m.AddClock(recorder))
 
 			m.ProcessEvent(ts2phcManagerObservation(clockType, "ens1", &event.TS2PHCObservation{
 				PollSuccessful: true, State: event.PTP_LOCKED, Offset: utils.ToPtr(float64(7)),
 			}))
-			assert.Empty(t, recorder.added, "raw observations are evaluated by the manager, not AddEvent")
+			require.Len(t, recorder.added, 1, "raw observations go through the clock's AddEvent")
+			assert.IsType(t, &event.TS2PHCObservation{}, recorder.added[0].Data)
 			require.NotNil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
 
+			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ts2phc.0.config", IFace: "ens1",
+				Data: &event.TS2PHCObservation{PollSuccessful: true, State: event.PTP_FREERUN, Offset: utils.ToPtr(float64(42))}})
+			require.Len(t, recorder.added, 2, "the clock receives and rejects an observation from another source")
+			assert.Equal(t, event.PTP_LOCKED, c.GetData(event.TS2PHC).GetDataDetails("ens1").State)
+
 			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ts2phc.0.config", Data: &event.TS2PHCRunStarted{}})
-			assert.Empty(t, recorder.added, "a run-start event from another source is rejected")
+			require.Len(t, recorder.added, 3, "the clock receives and rejects a run-start event from another source")
 			require.NotNil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
 
 			if clockType == event.TBC {
@@ -83,19 +93,54 @@ func TestTS2PHCManagerRoutesObservationsAndRunStart(t *testing.T) {
 			}
 			m.ProcessEvent(event.Event{Source: event.TS2PHC, CfgName: "ts2phc.0.config", ClockType: clockType, Data: &event.TS2PHCRunStarted{}})
 			m.SetApplying(false)
-			require.Len(t, recorder.added, 1, "run-start events go through the clock's AddEvent")
-			assert.IsType(t, &event.TS2PHCRunStarted{}, recorder.added[0].Data)
+			require.Len(t, recorder.added, 4, "run-start events go through the clock's AddEvent")
+			assert.IsType(t, &event.TS2PHCRunStarted{}, recorder.added[3].Data)
 			assert.Nil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
 
 			m.ProcessEvent(event.Event{
 				Source: event.TS2PHC, CfgName: "ts2phc.0.config", IFace: "ens1", ClockType: clockType,
 				Time: time.Now().UnixMilli(), Data: &event.OffsetData{State: event.PTP_LOCKED, Offset: 15},
 			})
-			require.Len(t, recorder.added, 2)
-			assert.IsType(t, &event.OffsetData{}, recorder.added[1].Data)
+			require.Len(t, recorder.added, 5)
+			assert.IsType(t, &event.OffsetData{}, recorder.added[4].Data)
 			require.NotNil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
 		})
 	}
+}
+
+func TestTS2PHCManagerIgnoresInputForUnsupportedClock(t *testing.T) {
+	m := Init("test-node", nil, nil, nil, nil, nil)
+	c, err := clock.NewBC("ptp4l.9.config", false, event.PtpClockThreshold{})
+	require.NoError(t, err)
+	require.NoError(t, m.AddClock(c))
+	select {
+	case <-m.StatsUpdatesCh():
+	default:
+	}
+	before := c.GetState()
+	for _, data := range []event.EventData{&event.TS2PHCObservation{}, &event.TS2PHCRunStarted{}} {
+		m.ProcessEvent(event.Event{Source: event.TS2PHC, CfgName: "ts2phc.9.config", Data: data})
+		assert.Equal(t, before, c.GetState())
+		assert.Empty(t, c.ProcessData(), "unsupported inputs must not create process details")
+		select {
+		case <-m.StatsUpdatesCh():
+			t.Fatal("ignored input must not publish a new snapshot")
+		default:
+		}
+	}
+}
+
+func TestTS2PHCClockClassMetricUsesClockConfig(t *testing.T) {
+	m, c, _, _ := newTS2PHCManagerTest(t, event.GM)
+	classes := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clock_class_config_test"}, []string{processLabel, nodeLabel, configLabel})
+	m.clockClassMetric = classes
+	m.ProcessEvent(event.Event{
+		Source: event.GNSS, CfgName: "ts2phc.0.config", IFace: "ens0", ClockType: event.GM,
+		Time: time.Now().UnixMilli(), Data: &event.GNSSData{GPSStatus: 3},
+	})
+	assert.Equal(t, event.PTP_FREERUN, c.GetState())
+	require.Equal(t, 1, testutil.CollectAndCount(classes))
+	assert.Equal(t, float64(248), testutil.ToFloat64(classes.WithLabelValues(string(event.PTP4l), "test-node", "ptp4l.0.config")))
 }
 
 func TestTS2PHCManagerPublishesClockVerdictsOnly(t *testing.T) {
@@ -115,7 +160,8 @@ func TestTS2PHCManagerPublishesClockVerdictsOnly(t *testing.T) {
 			assert.Equal(t, wantMeasurements, testutil.CollectAndCount(offset), "expected series remain present even before measurements arrive")
 			unavailable := offset.WithLabelValues("master", "test-node", string(event.TS2PHC), alias.GetAlias("ens1"))
 			assert.True(t, math.IsNaN(testutil.ToFloat64(unavailable)))
-			assert.Empty(t, m.ts2phcStateIfaces[c.ConfigName()])
+			key := sourceStateKey{clockName: c.ConfigName(), source: event.TS2PHC}
+			assert.Empty(t, m.sourceStateIfaces[key])
 			m.ProcessEvent(ts2phcManagerObservation(clockType, "ens1", &event.TS2PHCObservation{
 				PollSuccessful: true, State: event.PTP_LOCKED, Offset: utils.ToPtr(float64(0)),
 			}))
@@ -123,11 +169,11 @@ func TestTS2PHCManagerPublishesClockVerdictsOnly(t *testing.T) {
 			m.ProcessEvent(ts2phcManagerObservation(clockType, "", &event.TS2PHCObservation{Timestamp: "2000.400", PollTimeout: true}))
 			if clockType == event.TBC {
 				require.Len(t, c.GetData(event.TS2PHC).Details, 1, "normal T-BC ignores an unattributable timeout")
-				assert.Len(t, m.ts2phcStateIfaces[c.ConfigName()], 1)
+				assert.Len(t, m.sourceStateIfaces[key], 1)
 			} else {
 				require.Len(t, c.GetData(event.TS2PHC).Details, 3, "GM keeps its all-sink timeout policy")
 				assert.Equal(t, event.PTP_FREERUN, c.GetData(event.TS2PHC).GetDataDetails("ens0").State)
-				assert.Len(t, m.ts2phcStateIfaces[c.ConfigName()], 3)
+				assert.Len(t, m.sourceStateIfaces[key], 3)
 			}
 			assert.Equal(t, event.ClockStateLocked, testutil.ToFloat64(state.WithLabelValues(string(event.TS2PHC), "test-node", alias.GetAlias("ens1"))))
 			// Rejected role metadata must not overwrite a real sink's last state.
@@ -198,7 +244,7 @@ func TestTS2PHCManagerPublishesCleanupOnlyStateChange(t *testing.T) {
 	m.ProcessEvent(ts2phcManagerObservation(event.GM, "", &event.TS2PHCObservation{PHCDevice: "/dev/ptp1", Role: event.TS2PHCUnmanaged}))
 	assert.Equal(t, event.PTP_LOCKED, c.GetState())
 	assert.Nil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
-	assert.NotContains(t, m.ts2phcStateIfaces[c.ConfigName()], alias.GetAlias("ens1"))
+	assert.NotContains(t, m.sourceStateIfaces[sourceStateKey{clockName: c.ConfigName(), source: event.TS2PHC}], alias.GetAlias("ens1"))
 	select {
 	case <-m.SyncStatusUpdateCh():
 	default:
@@ -232,7 +278,7 @@ func TestTS2PHCManagerMissingOffsetDoesNotInventMeasurement(t *testing.T) {
 
 	m.ProcessEvent(ts2phcManagerObservation(event.TBC, "ens1", &event.TS2PHCObservation{PHCDevice: "/dev/ptp1", Role: event.TS2PHCUnmanaged}))
 	assert.Nil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
-	assert.NotContains(t, m.ts2phcStateIfaces[c.ConfigName()], alias.GetAlias("ens1"), "inactive sink state gauges follow clock-owned removal")
+	assert.NotContains(t, m.sourceStateIfaces[sourceStateKey{clockName: c.ConfigName(), source: event.TS2PHC}], alias.GetAlias("ens1"), "inactive sink state gauges follow clock-owned removal")
 }
 
 func TestTS2PHCManagerResetClearsPartialBatchAndStateMetrics(t *testing.T) {
@@ -242,9 +288,10 @@ func TestTS2PHCManagerResetClearsPartialBatchAndStateMetrics(t *testing.T) {
 	m.ProcessEvent(ts2phcManagerObservation(event.TBC, "", &event.TS2PHCObservation{
 		Timestamp: "2000.100", PHCDevice: "/dev/ptp1", PHCTstamp: &event.PHCTimestamp{Seconds: 10},
 	}))
-	require.Len(t, m.ts2phcStateIfaces[c.ConfigName()], 1)
+	key := sourceStateKey{clockName: c.ConfigName(), source: event.TS2PHC}
+	require.Len(t, m.sourceStateIfaces[key], 1)
 	m.ProcessEvent(event.Event{Source: event.TS2PHC, CfgName: "ts2phc.0.config", Reset: true})
-	assert.NotContains(t, m.ts2phcStateIfaces, c.ConfigName())
+	assert.NotContains(t, m.sourceStateIfaces, key)
 	assert.Equal(t, 2, testutil.CollectAndCount(offset), "process reset must not delete still-configured measurement series")
 	assert.Same(t, series, offset.WithLabelValues("master", "test-node", string(event.TS2PHC), alias.GetAlias("ens1")))
 	assert.True(t, math.IsNaN(testutil.ToFloat64(series)), "the previous run's offset is unavailable after reset")
@@ -283,7 +330,7 @@ func TestTS2PHCConfigRetainsSeriesAndDeletesRemovedInterfaces(t *testing.T) {
 	m.ProcessEvent(ts2phcManagerObservation(event.TBC, "ens1", &event.TS2PHCObservation{PollSuccessful: true, State: event.PTP_LOCKED, Offset: utils.ToPtr(float64(17))}))
 	series := offset.WithLabelValues("master", "test-node", string(event.TS2PHC), alias.GetAlias("ens1"))
 	require.Equal(t, float64(17), testutil.ToFloat64(series))
-	require.NoError(t, m.ConfigureTS2PHC("ts2phc.0.config", event.TS2PHCConfig{
+	require.NoError(t, m.ConfigureClock("ts2phc.0.config", event.TS2PHCConfig{
 		LeadingInterface: "ens0",
 		Interfaces: []event.TS2PHCInterface{
 			{Name: "ens0", PHCDevice: "/dev/ptp0", Source: event.PPS},
@@ -419,7 +466,7 @@ func TestTS2PHCManagerSetupConfigurationDoesNotActAsSample(t *testing.T) {
 	dpll.Details = event.DDetails{{IFace: "ens0", State: event.PTP_LOCKED}}
 	dpll.State = event.PTP_LOCKED
 	beforeState := c.GetState()
-	require.NoError(t, m.ConfigureTS2PHC("ts2phc.0.config", event.TS2PHCConfig{
+	require.NoError(t, m.ConfigureClock("ts2phc.0.config", event.TS2PHCConfig{
 		LeadingInterface: "ens0",
 		Interfaces:       []event.TS2PHCInterface{{Name: "ens9", PHCDevice: "/dev/ptp9"}},
 	}))
@@ -433,7 +480,36 @@ func TestTS2PHCManagerSetupConfigurationDoesNotActAsSample(t *testing.T) {
 
 func TestTS2PHCManagerConfigureUnknownClock(t *testing.T) {
 	m := Init("test-node", nil, nil, nil, nil, nil)
-	require.ErrorContains(t, m.ConfigureTS2PHC("ts2phc.9.config", event.TS2PHCConfig{}), "requires a GM or T-BC clock")
+	require.ErrorContains(t, m.ConfigureClock("ts2phc.9.config", event.TS2PHCConfig{}), "does not support configuration")
+}
+
+func TestClockManagerRejectsUnsupportedConfigurationWithoutMutation(t *testing.T) {
+	m, c, offset, _ := newTS2PHCManagerTest(t, event.TBC)
+	m.ProcessEvent(ts2phcManagerObservation(event.TBC, "ens1", &event.TS2PHCObservation{
+		PollSuccessful: true, State: event.PTP_LOCKED, Offset: utils.ToPtr(float64(17)),
+	}))
+	series := offset.WithLabelValues("master", "test-node", string(event.TS2PHC), alias.GetAlias("ens1"))
+	require.Equal(t, float64(17), testutil.ToFloat64(series))
+	before := c.GetState()
+	require.ErrorContains(t, m.ConfigureClock("ts2phc.0.config", nil), "unsupported clock configuration")
+	assert.Equal(t, before, c.GetState())
+	assert.Equal(t, float64(17), testutil.ToFloat64(series))
+	assert.NotNil(t, c.GetData(event.TS2PHC).GetDataDetails("ens1"))
+	var nilConfig *event.TS2PHCConfig
+	require.ErrorContains(t, m.ConfigureClock("ts2phc.0.config", nilConfig), "unsupported clock configuration")
+	assert.Equal(t, float64(17), testutil.ToFloat64(series))
+}
+
+func TestClockManagerConfiguresClockFromPointer(t *testing.T) {
+	m, c, offset, _ := newTS2PHCManagerTest(t, event.TBC)
+	config := &event.TS2PHCConfig{
+		LeadingInterface: "ens0",
+		Interfaces:       []event.TS2PHCInterface{{Name: "ens9", PHCDevice: "/dev/ptp9"}},
+	}
+	require.NoError(t, m.ConfigureClock("ts2phc.0.config", config))
+	assert.Equal(t, event.PTP_NOTSET, c.GetState())
+	require.Equal(t, 1, testutil.CollectAndCount(offset))
+	assert.True(t, math.IsNaN(testutil.ToFloat64(offset.WithLabelValues("master", "test-node", string(event.TS2PHC), alias.GetAlias("ens9")))))
 }
 
 func TestTS2PHCRunBoundaryKeepsThresholdAndConfiguredInterfaces(t *testing.T) {

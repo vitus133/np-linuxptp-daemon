@@ -636,9 +636,10 @@ func (p *ptpProcess) updateGMStatusOnProcessDown(process string) {
 		// (this nullifies the remaining pieces in the event data if ts2phc was killed during ptp profile change)
 		select {
 		case p.eventCh <- event.Event{
-			Source:  event.TS2PHC,
-			CfgName: p.configName,
-			Reset:   true,
+			Source:          event.TS2PHC,
+			CfgName:         p.configName,
+			Reset:           true,
+			ResetAllMetrics: true,
 		}:
 		default:
 		}

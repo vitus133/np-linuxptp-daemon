@@ -15,8 +15,8 @@ import (
 
 type ts2phcTestClock interface {
 	Clock
-	ObserveTS2PHC(event.Event, *event.TS2PHCObservation) TS2PHCUpdate
-	ApplyTS2PHC(TS2PHCUpdate) SyncState
+	observeTS2PHC(event.Event, *event.TS2PHCObservation) ts2phcUpdate
+	applyTS2PHC(ts2phcUpdate) SyncState
 	ConfigureTS2PHC(event.TS2PHCConfig)
 }
 
@@ -55,9 +55,12 @@ func ts2phcTestEvent(c ts2phcTestClock, iface string, observation *event.TS2PHCO
 }
 
 func observeTS2PHCTest(c ts2phcTestClock, iface string, observation *event.TS2PHCObservation) []event.Event {
-	update := c.ObserveTS2PHC(ts2phcTestEvent(c, iface, observation), observation)
-	c.ApplyTS2PHC(update)
-	return update.Events
+	result := c.AddEvent(ts2phcTestEvent(c, iface, observation))
+	events := make([]event.Event, 0, len(result.Events))
+	for _, report := range result.Events {
+		events = append(events, report.Event)
+	}
+	return events
 }
 
 func ts2phcTestStamp(device, logTime string, seconds int64) *event.TS2PHCObservation {
@@ -81,17 +84,17 @@ func TestTS2PHCObservationFiltersBeforeApplying(t *testing.T) {
 
 			raw := ts2phcTestOffset(0)
 			raw.NMEALocked = utils.ToPtr(true)
-			update := c.ObserveTS2PHC(ts2phcTestEvent(c, "ens1", raw), raw)
-			require.Len(t, update.Events, 1)
-			require.IsType(t, &event.OffsetData{}, update.Events[0].Data)
-			offset := update.Events[0].Data.(*event.OffsetData)
+			update := c.observeTS2PHC(ts2phcTestEvent(c, "ens1", raw), raw)
+			require.Len(t, update.events, 1)
+			require.IsType(t, &event.OffsetData{}, update.events[0].Data)
+			offset := update.events[0].Data.(*event.OffsetData)
 			require.NotNil(t, offset.NMEALocked)
 			assert.True(t, *offset.NMEALocked)
 			assert.Equal(t, event.PTP_FREERUN, data.GetDataDetails("ens1").State)
 			assert.Equal(t, before, c.GetState())
 			assert.Empty(t, recorder.messages, "filtering must not publish a clock-state change")
 
-			state := c.ApplyTS2PHC(update)
+			state := c.applyTS2PHC(update)
 			assert.Equal(t, c.GetState(), state.State)
 			assert.Equal(t, event.PTP_LOCKED, data.GetDataDetails("ens1").State)
 			assert.True(t, *raw.NMEALocked, "the raw observation remains unchanged")
@@ -117,15 +120,15 @@ func TestTS2PHCObservationDefersInactiveCleanup(t *testing.T) {
 			before := c.GetState()
 
 			raw := &event.TS2PHCObservation{PHCDevice: "/dev/ptp1", Role: event.TS2PHCUnmanaged}
-			update := c.ObserveTS2PHC(ts2phcTestEvent(c, "", raw), raw)
-			assert.Empty(t, update.Events)
+			update := c.observeTS2PHC(ts2phcTestEvent(c, "", raw), raw)
+			assert.Empty(t, update.events)
 			assert.Contains(t, update.inactivePHCs, "/dev/ptp1")
 			assert.NotNil(t, data.GetDataDetails("ens1"))
 			assert.Equal(t, event.PTP_FREERUN, data.State)
 			assert.Equal(t, before, c.GetState())
 			assert.Empty(t, recorder.messages)
 
-			state := c.ApplyTS2PHC(update)
+			state := c.applyTS2PHC(update)
 			assert.Equal(t, c.GetState(), state.State)
 			assert.Nil(t, data.GetDataDetails("ens1"))
 			assert.Equal(t, event.PTP_LOCKED, data.State)
@@ -153,7 +156,7 @@ func TestTS2PHCAddEventAcceptsEvaluatedEvents(t *testing.T) {
 	}
 }
 
-func TestTS2PHCAddEventRejectsRawObservations(t *testing.T) {
+func TestTS2PHCAddEventProcessesRawObservations(t *testing.T) {
 	for _, clockType := range []event.ClockType{event.GM, event.TBC} {
 		for _, tc := range []struct {
 			name        string
@@ -164,8 +167,6 @@ func TestTS2PHCAddEventRejectsRawObservations(t *testing.T) {
 		} {
 			t.Run(string(clockType)+"/"+tc.name, func(t *testing.T) {
 				c, tracker := newTS2PHCTestClock(clockType)
-				recorder := &ipcRecorder{}
-				c.SetIPC(recorder.send)
 				data := c.GetData(event.TS2PHC)
 				data.Details = event.DDetails{{IFace: "ens1", State: event.PTP_FREERUN, Offset: 99, HasOffset: true}}
 				data.UpdateState()
@@ -173,15 +174,53 @@ func TestTS2PHCAddEventRejectsRawObservations(t *testing.T) {
 				tracker.currentPollCycle = cycle
 				before := c.GetState()
 
-				state := c.AddEvent(ts2phcTestEvent(c, "ens1", tc.observation))
-				assert.Equal(t, before, state.State)
-				assert.Equal(t, event.PTP_FREERUN, data.GetDataDetails("ens1").State)
-				assert.Equal(t, int64(99), data.GetDataDetails("ens1").Offset)
+				result := c.AddEvent(ts2phcTestEvent(c, "ens1", tc.observation))
+				assert.False(t, result.Ignored)
 				assert.Same(t, cycle, tracker.currentPollCycle)
-				assert.False(t, cycle.tstamps[0].handled)
-				assert.Empty(t, recorder.messages)
+				if tc.observation == nil {
+					assert.Empty(t, result.Events)
+					assert.Equal(t, before, result.State)
+					assert.Equal(t, event.PTP_FREERUN, data.GetDataDetails("ens1").State)
+					assert.Equal(t, int64(99), data.GetDataDetails("ens1").Offset)
+					assert.False(t, cycle.tstamps[0].handled)
+					return
+				}
+				require.Len(t, result.Events, 1)
+				assert.Equal(t, "master", result.Events[0].OffsetSource)
+				assert.False(t, result.Events[0].OffsetUnavailable)
+				require.Len(t, result.Metrics, 1)
+				assert.Equal(t, event.TS2PHC, result.Metrics[0].Source)
+				require.NotNil(t, result.Metrics[0].Offsets)
+				require.NotNil(t, result.Metrics[0].States)
+				assert.Equal(t, event.PTP_LOCKED, data.GetDataDetails("ens1").State)
+				assert.Equal(t, int64(42), data.GetDataDetails("ens1").Offset)
+				assert.True(t, cycle.tstamps[0].handled)
+				assert.Equal(t, c.GetState(), result.State)
+				assert.Equal(t, event.PTP_LOCKED, tc.observation.State)
 			})
 		}
+	}
+}
+
+func TestTS2PHCAddEventReportsUnavailableOffset(t *testing.T) {
+	for _, clockType := range []event.ClockType{event.GM, event.TBC} {
+		t.Run(string(clockType), func(t *testing.T) {
+			c, _ := newTS2PHCTestClock(clockType)
+			first := ts2phcTestStamp("/dev/ptp1", "2000.100", 10)
+			assert.Empty(t, c.AddEvent(ts2phcTestEvent(c, "", first)).Events)
+			second := ts2phcTestStamp("/dev/ptp1", "2001.100", 11)
+			result := c.AddEvent(ts2phcTestEvent(c, "", second))
+			for _, report := range result.Events {
+				if report.Event.IFace != "ens1" {
+					continue
+				}
+				require.IsType(t, &event.StateData{}, report.Event.Data)
+				assert.Equal(t, "master", report.OffsetSource)
+				assert.True(t, report.OffsetUnavailable)
+				return
+			}
+			t.Fatal("missing sink offset was not reported")
+		})
 	}
 }
 
@@ -359,14 +398,14 @@ func TestTS2PHCTBCCleanupAndMeasurementAreAppliedTogether(t *testing.T) {
 	// A successful follower offset ends the holdover indication. The now
 	// unmonitored leader must be removed in the same update as that offset.
 	raw := ts2phcTestOffset(0)
-	update := c.ObserveTS2PHC(ts2phcTestEvent(c, "ens1", raw), raw)
-	require.Len(t, update.Events, 1)
+	update := c.observeTS2PHC(ts2phcTestEvent(c, "ens1", raw), raw)
+	require.Len(t, update.events, 1)
 	assert.Equal(t, []string{"/dev/ptp0"}, update.inactivePHCs)
 	assert.NotNil(t, data.GetDataDetails("ens0"))
 	assert.Equal(t, event.PTP_FREERUN, data.GetDataDetails("ens1").State)
 	assert.Empty(t, recorder.messages)
 
-	state := c.ApplyTS2PHC(update)
+	state := c.applyTS2PHC(update)
 	assert.Nil(t, data.GetDataDetails("ens0"))
 	follower := data.GetDataDetails("ens1")
 	require.NotNil(t, follower)

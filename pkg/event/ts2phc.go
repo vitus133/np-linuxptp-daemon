@@ -38,6 +38,8 @@ type TS2PHCConfig struct {
 	Threshold        PtpClockThreshold
 }
 
+func (TS2PHCConfig) clockConfiguration() {}
+
 // TS2PHCObservation carries process facts, before clock-specific evaluation.
 // State is the state reported on an offset line, without threshold evaluation.
 // PollSuccessful distinguishes real servo offsets from NMEA status metrics.
@@ -60,9 +62,13 @@ type TS2PHCRunStarted struct{}
 
 func (*TS2PHCRunStarted) eventData() {}
 
+func (*TS2PHCRunStarted) clockInput() {}
+
 func (*TS2PHCRunStarted) String() string { return "ts2phc run started" }
 
 func (*TS2PHCObservation) eventData() {}
+
+func (*TS2PHCObservation) clockInput() {}
 
 func (d *TS2PHCObservation) String() string {
 	return fmt.Sprintf("ts2phc observation: clock=%s timestamp=%s role=%s timeout=%t", d.PHCDevice, d.Timestamp, d.Role, d.PollTimeout)

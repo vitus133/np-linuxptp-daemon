@@ -8,6 +8,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
+	parserconstants "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 )
 
 // ts2phcPolicy is selected by the owning clock, not inferred by the tracker.
@@ -16,10 +17,28 @@ type ts2phcPolicy struct {
 	pollTimeouts bool
 }
 
-// TS2PHCUpdate is the result of filtering one observation. Apply it once to the
-// same clock immediately, even when Events is empty: it may also carry cleanup.
-type TS2PHCUpdate struct {
-	Events       []event.Event
+type ts2phcMetricOptions struct {
+	includeOffsets    bool
+	invalidateOffsets bool
+	includeStates     bool
+}
+
+func ts2phcConfig(config event.ClockConfiguration) (event.TS2PHCConfig, bool) {
+	switch value := config.(type) {
+	case event.TS2PHCConfig:
+		return value, true
+	case *event.TS2PHCConfig:
+		if value != nil {
+			return *value, true
+		}
+	}
+	return event.TS2PHCConfig{}, false
+}
+
+// ts2phcUpdate is applied once to the same clock, including when it only
+// carries inactive-PHC cleanup and has no reportable events.
+type ts2phcUpdate struct {
+	events       []event.Event
 	inactivePHCs []string
 	trigger      event.Event
 }
@@ -140,8 +159,8 @@ func (t *ts2phcTracker) offsetInterfaces(policy ts2phcPolicy) []string {
 
 // observe produces clock events and cleanup instructions without changing the
 // clock's data or synchronization state. prepare must run before choosing policy.
-func (t *ts2phcTracker) observe(ev event.Event, observation *event.TS2PHCObservation, policy ts2phcPolicy) TS2PHCUpdate {
-	update := TS2PHCUpdate{trigger: ev}
+func (t *ts2phcTracker) observe(ev event.Event, observation *event.TS2PHCObservation, policy ts2phcPolicy) ts2phcUpdate {
+	update := ts2phcUpdate{trigger: ev}
 	if policy.skipPHC != "" && policy.skipPHC != t.skipPHC {
 		update.inactivePHCs = append(update.inactivePHCs, policy.skipPHC)
 	}
@@ -149,8 +168,40 @@ func (t *ts2phcTracker) observe(ev event.Event, observation *event.TS2PHCObserva
 		!slices.Contains(update.inactivePHCs, observation.PHCDevice) {
 		update.inactivePHCs = append(update.inactivePHCs, observation.PHCDevice)
 	}
-	update.Events = t.events(ev, observation, policy)
+	update.events = t.events(ev, observation, policy)
 	return update
+}
+
+func (t *ts2phcTracker) sourceMetrics(holder *DataHolder, configName string, policy ts2phcPolicy, options ts2phcMetricOptions) SourceMetrics {
+	metrics := SourceMetrics{ConfigName: configName, Source: event.TS2PHC}
+	if options.includeOffsets {
+		metrics.Offsets = &OffsetMetrics{From: parserconstants.Master, Interfaces: t.offsetInterfaces(policy), Invalidate: options.invalidateOffsets}
+	}
+	if options.includeStates {
+		metrics.States = &StateMetrics{}
+		holder.dataMu.RLock()
+		defer holder.dataMu.RUnlock()
+		for _, data := range holder.data {
+			if data == nil || data.ProcessName != event.TS2PHC {
+				continue
+			}
+			for _, detail := range data.Details {
+				if detail != nil && detail.IFace != "" && (detail.State == event.PTP_LOCKED || detail.State == event.PTP_FREERUN || detail.State == event.PTP_HOLDOVER) {
+					metrics.States.Details = append(metrics.States.Details, SourceState{IFace: detail.IFace, State: detail.State})
+				}
+			}
+		}
+	}
+	return metrics
+}
+
+func ts2phcEventResult(state SyncState, events []event.Event, metrics SourceMetrics) EventResult {
+	result := EventResult{SyncState: state, Metrics: []SourceMetrics{metrics}}
+	for _, ev := range events {
+		_, unavailable := ev.Data.(*event.StateData)
+		result.Events = append(result.Events, EventReport{Event: ev, OffsetSource: parserconstants.Master, OffsetUnavailable: unavailable})
+	}
+	return result
 }
 
 // discardInactiveTS2PHC removes stale fault state when a PHC stops being

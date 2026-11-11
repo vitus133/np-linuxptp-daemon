@@ -280,6 +280,17 @@ func TestTS2PHCObservationBackpressureCanBeStopped(t *testing.T) {
 	}
 }
 
+func TestTS2PHCProcessDownRequestsConfigMetricCleanup(t *testing.T) {
+	p := newTS2PHCObservationTestProcess()
+	p.updateGMStatusOnProcessDown(ts2phcProcessName)
+	events := drainEvents(p.eventCh)
+	require.Len(t, events, 1)
+	assert.Equal(t, event.TS2PHC, events[0].Source)
+	assert.Equal(t, p.configName, events[0].CfgName)
+	assert.True(t, events[0].Reset)
+	assert.True(t, events[0].ResetAllMetrics)
+}
+
 func TestTS2PHCProcessRunBoundaryPrecedesScannedObservations(t *testing.T) {
 	p := newTS2PHCObservationTestProcess()
 	p.cmd = &ts2phcLogCmd{MockCmd: NewMockCmd()}
@@ -319,7 +330,7 @@ func TestTS2PHCOCPBUGS138633ClockPipeline(t *testing.T) {
 			require.NoError(t, err)
 			manager := clockmgr.Init("test-node", nil, nil, nil, nil, nil)
 			require.NoError(t, manager.AddClock(c))
-			require.NoError(t, manager.ConfigureTS2PHC(p.configName, p.ts2phcConfig()))
+			require.NoError(t, manager.ConfigureClock(p.configName, p.ts2phcConfig()))
 			p.forwardTS2PHCEvent("", &event.TS2PHCRunStarted{})
 			feedTS2PHCPollLine(p, "17619.000", "selecting /dev/ptp0 for synchronization")
 			feedTS2PHCPollLine(p, "17620.900", "unselecting /dev/ptp0 for synchronization")

@@ -83,23 +83,41 @@ func (c *GM) Reset() {
 }
 
 // AddEvent processes an event and updates clock state.
-func (c *GM) AddEvent(ev event.Event) SyncState {
-	if _, ok := ev.Data.(*event.TS2PHCRunStarted); ok {
-		return c.StartTS2PHCRun(ev)
-	}
-	if _, ok := ev.Data.(*event.TS2PHCObservation); ok {
-		// Raw observations must go through the clock manager so their evaluated
-		// events are also available for logging and metrics.
-		return c.syncState
+func (c *GM) AddEvent(ev event.Event) EventResult {
+	policy := ts2phcPolicy{pollTimeouts: true}
+	switch data := ev.Data.(type) {
+	case *event.TS2PHCRunStarted:
+		if ev.Source != event.TS2PHC {
+			return EventResult{SyncState: c.syncState, Ignored: true}
+		}
+		state := c.startTS2PHCRun(ev)
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, policy,
+			ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true, includeStates: true})
+		return ts2phcEventResult(state, nil, metrics)
+	case *event.TS2PHCObservation:
+		if ev.Source != event.TS2PHC {
+			return EventResult{SyncState: c.syncState, Ignored: true}
+		}
+		update := c.observeTS2PHC(ev, data)
+		state := c.applyTS2PHC(update)
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, policy,
+			ts2phcMetricOptions{includeOffsets: true, includeStates: true})
+		return ts2phcEventResult(state, update.events, metrics)
+	case event.ClockInput:
+		return EventResult{SyncState: c.syncState, Ignored: true}
 	}
 	if ev.Source == event.PMC {
-		return c.syncState
+		return eventResult(c.syncState, ev)
 	}
 
 	d := c.recordEvent(ev)
 	clockState := c.evaluateEvent(ev)
 	c.reportEvent(ev, d, clockState)
-	return clockState
+	if ev.Source == event.TS2PHC {
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, policy, ts2phcMetricOptions{includeStates: true})
+		return ts2phcEventResult(clockState, []event.Event{ev}, metrics)
+	}
+	return eventResult(clockState, ev)
 }
 
 func (c *GM) recordEvent(ev event.Event) *event.Data {
@@ -153,8 +171,31 @@ func (c *GM) ConfigureTS2PHC(config event.TS2PHCConfig) {
 	c.ts2phc.configure(config)
 }
 
-// StartTS2PHCRun clears only ts2phc measurements and partial poll tracking.
-func (c *GM) StartTS2PHCRun(ev event.Event) SyncState {
+// Configure installs setup-time clock configuration and returns metric series.
+func (c *GM) Configure(configName string, config event.ClockConfiguration) ([]SourceMetrics, error) {
+	ts2phc, ok := ts2phcConfig(config)
+	if !ok {
+		return nil, fmt.Errorf("unsupported clock configuration %T", config)
+	}
+	c.ConfigureTS2PHC(ts2phc)
+	metrics := c.ts2phc.sourceMetrics(&c.DataHolder, configName, ts2phcPolicy{pollTimeouts: true},
+		ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true})
+	return []SourceMetrics{metrics}, nil
+}
+
+// MetricsAfterReset describes source metrics retained after a clock reset.
+func (c *GM) MetricsAfterReset(configName string, source event.EventSource) []SourceMetrics {
+	if source != event.TS2PHC {
+		return nil
+	}
+	metrics := c.ts2phc.sourceMetrics(&c.DataHolder, configName, ts2phcPolicy{pollTimeouts: true},
+		ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true})
+	metrics.ClearOtherSources = true
+	return []SourceMetrics{metrics}
+}
+
+// startTS2PHCRun clears only ts2phc measurements and partial poll tracking.
+func (c *GM) startTS2PHCRun(ev event.Event) SyncState {
 	if ev.Source != event.TS2PHC {
 		return c.syncState
 	}
@@ -166,31 +207,31 @@ func (c *GM) StartTS2PHCRun(ev event.Event) SyncState {
 	return c.syncState
 }
 
-// ObserveTS2PHC updates tracking and filters process facts using GM policy. It
+// observeTS2PHC updates tracking and filters process facts using GM policy. It
 // does not change stored process data or evaluate the clock's sync state. The
 // GNSS-disciplined leading PHC remains a sink in all modes.
-func (c *GM) ObserveTS2PHC(ev event.Event, observation *event.TS2PHCObservation) TS2PHCUpdate {
+func (c *GM) observeTS2PHC(ev event.Event, observation *event.TS2PHCObservation) ts2phcUpdate {
 	if ev.Source != event.TS2PHC || observation == nil {
-		return TS2PHCUpdate{}
+		return ts2phcUpdate{}
 	}
 	if !c.ts2phc.prepare(observation) {
-		return TS2PHCUpdate{}
+		return ts2phcUpdate{}
 	}
 	return c.ts2phc.observe(ev, observation, ts2phcPolicy{pollTimeouts: true})
 }
 
-// ApplyTS2PHC records the filtered events and removes inactive data before
+// applyTS2PHC records the filtered events and removes inactive data before
 // evaluating and publishing the final clock state for the observation.
-func (c *GM) ApplyTS2PHC(update TS2PHCUpdate) SyncState {
+func (c *GM) applyTS2PHC(update ts2phcUpdate) SyncState {
 	changed := c.discardInactiveTS2PHC(&c.ts2phc, update.inactivePHCs)
-	for _, evaluated := range update.Events {
+	for _, evaluated := range update.events {
 		c.recordEvent(evaluated)
 	}
-	if !changed && len(update.Events) == 0 {
+	if !changed && len(update.events) == 0 {
 		return c.syncState
 	}
 	clockState := c.evaluateEvent(update.trigger)
-	for _, evaluated := range update.Events {
+	for _, evaluated := range update.events {
 		c.reportEvent(evaluated, c.GetData(evaluated.Source), clockState)
 	}
 	return c.syncState

@@ -177,15 +177,37 @@ func (c *TBC) SourceQualification(cfg string) (event.SourceQualification, bool) 
 }
 
 // AddEvent processes an event and updates clock state.
-func (c *TBC) AddEvent(ev event.Event) SyncState {
-	if _, ok := ev.Data.(*event.TS2PHCRunStarted); ok {
-		return c.StartTS2PHCRun(ev)
+func (c *TBC) AddEvent(ev event.Event) EventResult {
+	switch data := ev.Data.(type) {
+	case *event.TS2PHCRunStarted:
+		if ev.Source != event.TS2PHC {
+			return EventResult{SyncState: c.syncState, Ignored: true}
+		}
+		state := c.startTS2PHCRun(ev)
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, c.ts2phcPolicy(),
+			ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true, includeStates: true})
+		return ts2phcEventResult(state, nil, metrics)
+	case *event.TS2PHCObservation:
+		if ev.Source != event.TS2PHC {
+			return EventResult{SyncState: c.syncState, Ignored: true}
+		}
+		update := c.observeTS2PHC(ev, data)
+		state := c.applyTS2PHC(update)
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, c.ts2phcPolicy(),
+			ts2phcMetricOptions{includeOffsets: true, includeStates: true})
+		return ts2phcEventResult(state, update.events, metrics)
+	case event.ClockInput:
+		return EventResult{SyncState: c.syncState, Ignored: true}
 	}
-	if _, ok := ev.Data.(*event.TS2PHCObservation); ok {
-		// Raw observations must go through the clock manager so their evaluated
-		// events are also available for logging and metrics.
-		return c.syncState
+	state := c.addEvent(ev)
+	if ev.Source == event.TS2PHC {
+		metrics := c.ts2phc.sourceMetrics(&c.DataHolder, ev.CfgName, c.ts2phcPolicy(), ts2phcMetricOptions{includeStates: true})
+		return ts2phcEventResult(state, []event.Event{ev}, metrics)
 	}
+	return eventResult(state, ev)
+}
+
+func (c *TBC) addEvent(ev event.Event) SyncState {
 	switch ev.Source {
 	case event.SYNCE:
 		c.processSyncE(ev)
@@ -204,6 +226,13 @@ func (c *TBC) AddEvent(ev event.Event) SyncState {
 		c.evaluateState()
 		return c.syncState
 	}
+}
+
+// DuringApply accepts only a new ts2phc run boundary and defers aggregate
+// reporting until profile apply completes.
+func (c *TBC) DuringApply(ev event.Event) (bool, bool) {
+	_, started := ev.Data.(*event.TS2PHCRunStarted)
+	return started && ev.Source == event.TS2PHC, false
 }
 
 func (c *TBC) recordEvent(ev event.Event) {
@@ -232,37 +261,60 @@ func (c *TBC) ConfigureTS2PHC(config event.TS2PHCConfig) {
 	c.SetConfiguredLeadingInterface(leading)
 }
 
-// StartTS2PHCRun clears only ts2phc measurements and partial poll tracking.
+// Configure installs setup-time clock configuration and returns metric series.
+func (c *TBC) Configure(configName string, config event.ClockConfiguration) ([]SourceMetrics, error) {
+	ts2phc, ok := ts2phcConfig(config)
+	if !ok {
+		return nil, fmt.Errorf("unsupported clock configuration %T", config)
+	}
+	c.ConfigureTS2PHC(ts2phc)
+	metrics := c.ts2phc.sourceMetrics(&c.DataHolder, configName, c.ts2phcPolicy(),
+		ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true})
+	return []SourceMetrics{metrics}, nil
+}
+
+// MetricsAfterReset describes source metrics retained after a clock reset.
+func (c *TBC) MetricsAfterReset(configName string, source event.EventSource) []SourceMetrics {
+	if source != event.TS2PHC {
+		return nil
+	}
+	metrics := c.ts2phc.sourceMetrics(&c.DataHolder, configName, c.ts2phcPolicy(),
+		ts2phcMetricOptions{includeOffsets: true, invalidateOffsets: true})
+	metrics.ClearOtherSources = true
+	return []SourceMetrics{metrics}
+}
+
+// startTS2PHCRun clears only ts2phc measurements and partial poll tracking.
 // The next ordinary event evaluates the aggregate T-BC state; process startup
 // must not itself advance the FSM during profile apply.
-func (c *TBC) StartTS2PHCRun(ev event.Event) SyncState {
+func (c *TBC) startTS2PHCRun(ev event.Event) SyncState {
 	if ev.Source == event.TS2PHC {
 		c.ts2phc.startRun(&c.DataHolder)
 	}
 	return c.syncState
 }
 
-// ObserveTS2PHC updates tracking and filters facts using T-BC policy without
+// observeTS2PHC updates tracking and filters facts using T-BC policy without
 // changing stored process data or evaluating the aggregate FSM. Monitoring is
 // based on upstream evidence, not the aggregate FSM state.
-func (c *TBC) ObserveTS2PHC(ev event.Event, observation *event.TS2PHCObservation) TS2PHCUpdate {
+func (c *TBC) observeTS2PHC(ev event.Event, observation *event.TS2PHCObservation) ts2phcUpdate {
 	if ev.Source != event.TS2PHC || observation == nil {
-		return TS2PHCUpdate{}
+		return ts2phcUpdate{}
 	}
 	if !c.ts2phc.prepare(observation) {
-		return TS2PHCUpdate{}
+		return ts2phcUpdate{}
 	}
 	return c.ts2phc.observe(ev, observation, c.ts2phcPolicy())
 }
 
-// ApplyTS2PHC records the filtered events and removes inactive data before
+// applyTS2PHC records the filtered events and removes inactive data before
 // evaluating and publishing the final clock state for the observation.
-func (c *TBC) ApplyTS2PHC(update TS2PHCUpdate) SyncState {
+func (c *TBC) applyTS2PHC(update ts2phcUpdate) SyncState {
 	changed := c.discardInactiveTS2PHC(&c.ts2phc, update.inactivePHCs)
-	for _, evaluated := range update.Events {
+	for _, evaluated := range update.events {
 		c.recordEvent(evaluated)
 	}
-	if changed || len(update.Events) > 0 {
+	if changed || len(update.events) > 0 {
 		c.evaluateState()
 	}
 	return c.syncState
