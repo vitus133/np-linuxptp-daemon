@@ -306,11 +306,11 @@ func (pmc *PMCProcess) expectWorker(exp *expect.GExpect, parentDSCh chan<- proto
 		}
 
 		if len(matches) > 0 && strings.Contains(matches[0], "PARENT_DATA_SET") {
-			glog.Infof("PMC monitor: PARENT_DATA_SET notification received for %s", pmc.configFileName)
 			processedMessage, procErr := protocol.ProcessMessage[protocol.ParentDataSet](matches)
 			if procErr != nil {
 				glog.Warningf("failed to process message for PARENT_DATA_SET: %s", procErr)
 			} else {
+				glog.Infof("PMC monitor: PARENT_DATA_SET notification received for %s:\n%s", pmc.configFileName, processedMessage.String())
 				parentDSCh <- *processedMessage
 			}
 		}
