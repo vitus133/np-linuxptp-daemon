@@ -692,9 +692,9 @@ func (c *TBC) isSourceLostBC() bool {
 // isPTPSourceLost reports whether the upstream PTP source is lost. The source is
 // lost when the PARENT_DATA_SET has no grandmaster (we never acquired an
 // upstream), when the grandmaster is our own clock (we became our own GM because
-// no upstream is available), or when the grandmaster reports freerun clock class
-// 248. A BMCA switchover between upstream ports keeps the same remote grandmaster
-// identity, so it does not register as loss.
+// no upstream is available), or when the grandmaster reports a non-synced clock
+// class (freerun 248 or slave-only 255). A BMCA switchover between upstream ports
+// keeps the same remote grandmaster identity, so it does not register as loss.
 func (c *TBC) isPTPSourceLost() bool {
 	pds := c.leadingClockData.upstreamParentDataSet
 	if pds == nil || pds.GrandmasterIdentity == "" {
@@ -703,7 +703,7 @@ func (c *TBC) isPTPSourceLost() bool {
 	if c.leadingClockData.clockID != "" && pds.GrandmasterIdentity == c.leadingClockData.clockID {
 		return true
 	}
-	return pds.GrandmasterClockClass == uint8(protocol.ClockClassFreerun)
+	return pds.GrandmasterClockClass >= uint8(protocol.ClockClassFreerun)
 }
 
 // IsPTPSourceLost reports whether the upstream PTP source is lost. Exposed so the
