@@ -531,11 +531,6 @@ func (c *TBC) announceLocalData(cfgName string) {
 			glog.Errorf("Failed to set GM settings: %v", err)
 		}
 	}()
-	go func() {
-		if err := c.pmcClient.SetGMSettings(cfgName, gs); err != nil {
-			glog.Errorf("Failed to set GM settings: %v", err)
-		}
-	}()
 }
 
 // downstreamAnnounceIWF fetches the upstream parent/time/current datasets via PMC and posts them back to the

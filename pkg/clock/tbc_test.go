@@ -269,9 +269,9 @@ func TestAnnounceLocalData_Freerun_SetsGMSettingsAndEGP(t *testing.T) {
 
 	bc.announceLocalData(cfgName)
 
-	// 3 async goroutines: 1 EGP + 2 GM settings
+	// 2 async goroutines: 1 EGP + 1 GM settings (downstream only)
 	if !assert.Eventually(t, func() bool {
-		return len(mock.SnapshotSetCalls()) >= 3
+		return len(mock.SnapshotSetCalls()) >= 2
 	}, 1*time.Second, 10*time.Millisecond) {
 		return
 	}
@@ -285,19 +285,15 @@ func TestAnnounceLocalData_Freerun_SetsGMSettingsAndEGP(t *testing.T) {
 	assert.Equal(t, uint16(0), egpCalls[0].ExternalGMPropertiesNP.StepsRemoved)
 
 	gmCalls := filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")
-	if !assert.Len(t, gmCalls, 2) {
+	if !assert.Len(t, gmCalls, 1) {
 		return
 	}
 
-	configs := []string{gmCalls[0].CfgName, gmCalls[1].CfgName}
-	assert.Contains(t, configs, testControlledCfg)
-	assert.Contains(t, configs, cfgName)
+	// GM settings are announced only to the downstream (controlled) config, not the TR.
+	assert.Equal(t, testControlledCfg, gmCalls[0].CfgName)
 
-	for _, call := range gmCalls {
-		gs := call.GMSettings
-		if !assert.NotNil(t, gs) {
-			continue
-		}
+	gs := gmCalls[0].GMSettings
+	if assert.NotNil(t, gs) {
 		assert.Equal(t, protocol.ClockClassFreerun, gs.ClockQuality.ClockClass)
 		assert.Equal(t, fbprotocol.ClockAccuracyUnknown, gs.ClockQuality.ClockAccuracy)
 		assert.True(t, gs.TimePropertiesDS.PtpTimescale)
@@ -325,13 +321,13 @@ func TestAnnounceLocalData_Holdover135_SetsTimeProperties(t *testing.T) {
 	bc.announceLocalData(cfgName)
 
 	if !assert.Eventually(t, func() bool {
-		return len(filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")) >= 2
+		return len(filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")) >= 1
 	}, 1*time.Second, 10*time.Millisecond) {
 		return
 	}
 
 	gmCalls := filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")
-	if !assert.Len(t, gmCalls, 2) {
+	if !assert.Len(t, gmCalls, 1) {
 		return
 	}
 
@@ -366,13 +362,13 @@ func TestAnnounceLocalData_Holdover165_NotTimeTraceable(t *testing.T) {
 	bc.announceLocalData(cfgName)
 
 	if !assert.Eventually(t, func() bool {
-		return len(filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")) >= 2
+		return len(filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")) >= 1
 	}, 1*time.Second, 10*time.Millisecond) {
 		return
 	}
 
 	gmCalls := filterSetCalls(mock.SnapshotSetCalls(), "SetGMSettings")
-	if !assert.Len(t, gmCalls, 2) {
+	if !assert.Len(t, gmCalls, 1) {
 		return
 	}
 
