@@ -155,13 +155,18 @@ func (p *ptpProcess) applySourceQualification(result event.SourceQualification) 
 	if q.closed || result.Generation != q.generation {
 		return
 	}
+	// Offset-based qualification drives LOCKED. The parent data set independently
+	// drives LOST: a lost upstream grandmaster must reach the hardware pins even
+	// when the servo offset remains in spec (GNSS/ts2phc keeps it near zero).
+	qualified := result.Qualified && !p.ptpSourceLost()
+
 	p.tBCAttributes.activePort = result.IFace // label existing state/averaged-offset events
 	previousState := p.tBCAttributes.lastReportedState
 	if result.Changed {
 		glog.Infof("PTPSourceQualified profile=%s config=%s source=%s port=%s qualified=%t reason=%q samples=%d",
-			getProfileName(p.nodeProfile), p.configName, result.SourceType, result.IFace, result.Qualified, result.Reason, result.Samples)
+			getProfileName(p.nodeProfile), p.configName, result.SourceType, result.IFace, qualified, result.Reason, result.Samples)
 	}
-	if result.Qualified {
+	if qualified {
 		p.tBCAttributes.lastReportedState = event.PTP_LOCKED
 	} else {
 		p.tBCAttributes.lastReportedState = event.PTP_FREERUN
@@ -171,19 +176,34 @@ func (p *ptpProcess) applySourceQualification(result event.SourceQualification) 
 	if previousState != p.tBCAttributes.lastReportedState {
 		p.sendPtp4lStateEvent()
 	}
-	if q.appliedKnown && q.applied == result.Qualified {
+	if q.appliedKnown && q.applied == qualified {
 		return
 	}
-	if err := q.apply(result.Qualified); err != nil {
+	if err := q.apply(qualified); err != nil {
 		q.appliedKnown = false // failed actions may have partially programmed pins
-		glog.Errorf("PTPSourceQualified hardware apply profile=%s qualified=%t: %v", getProfileName(p.nodeProfile), result.Qualified, err)
+		glog.Errorf("PTPSourceQualified hardware apply profile=%s qualified=%t: %v", getProfileName(p.nodeProfile), qualified, err)
 		return
 	}
-	q.applied, q.appliedKnown = result.Qualified, true
+	q.applied, q.appliedKnown = qualified, true
 	p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
-	if result.Qualified {
+	if qualified {
 		p.tBCAttributes.lastAppliedState = event.PTP_LOCKED
 	}
+}
+
+// applySourceLossIfNeeded re-evaluates the hardware condition when the parent
+// data set reports the upstream grandmaster is gone. Offset-based qualification
+// alone cannot observe this loss (GNSS/ts2phc keeps the servo offset near zero),
+// so the lost condition is driven from the parent data set here.
+func (p *ptpProcess) applySourceLossIfNeeded() {
+	if p.sourceQualification == nil || !p.ptpSourceLost() {
+		return
+	}
+	result, exists := p.dn.processManager.clockMgr.SourceQualification(p.configName)
+	if !exists {
+		return
+	}
+	p.applySourceQualification(result)
 }
 
 func (p *ptpProcess) invalidateSourceQualification() {
