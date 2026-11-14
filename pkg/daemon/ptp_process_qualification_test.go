@@ -17,6 +17,7 @@ import (
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/plugin"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/pmc"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/process"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	"github.com/stretchr/testify/require"
@@ -82,7 +83,7 @@ func TestSourceQualificationFreshSamplesAndHardware(t *testing.T) {
 			p := &ptpProcess{
 				ExecProcess:   ExecProcess{name: ptp4lProcessName, configName: "ptp4l.0.config", eventCh: make(chan event.Event, 20)},
 				nodeProfile:   &ptpv1.PtpProfile{},
-				tBCAttributes: tBCProcessAttributes{trIfaceNames: []string{"tr0", "tr1"}, perPortState: map[string]event.PTPState{}},
+				tBCAttributes: tBCProcessAttributes{trIfaceNames: []string{"tr0", "tr1"}},
 				sourceQualification: &sourceQualificationRuntime{
 					apply: func(v bool) error { actions = append(actions, v); return nil },
 				},
@@ -118,13 +119,13 @@ func TestSourceQualificationFreshSamplesAndHardware(t *testing.T) {
 			p.forwardSourceData(metric, nil)
 			require.True(t, qualified(), "servo degradation is not port loss; no extra aggregate InSync prerequisite")
 			p.forwardSourceData(nil, &parser.PTPEvent{Iface: "tr1", Role: parserconstants.PortRoleSlave})
-			require.False(t, qualified(), "new active port must requalify")
+			require.True(t, qualified(), "a BMCA port switchover must not reset readiness")
 			wrongPort := *metric
 			wrongPort.Iface = "tr0"
 			p.forwardSourceData(&wrongPort, nil)
-			require.False(t, qualified())
+			require.True(t, qualified(), "samples from a non-selected port are ignored")
 			p.forwardSourceData(nil, &parser.PTPEvent{Iface: "tr1", Role: parserconstants.PortRoleMaster})
-			require.False(t, qualified())
+			require.True(t, qualified(), "a port leaving SLAVE is not a source-loss signal")
 		})
 	}
 }
@@ -133,7 +134,7 @@ func TestSourceQualificationHardwareFailure(t *testing.T) {
 	t.Parallel()
 	fail := true
 	p := &ptpProcess{ExecProcess: ExecProcess{name: ptp4lProcessName, configName: "ptp4l.0.config", eventCh: make(chan event.Event, 10)}, nodeProfile: &ptpv1.PtpProfile{},
-		tBCAttributes: tBCProcessAttributes{activePort: "tr0", trIfaceNames: []string{"tr0"}, perPortState: map[string]event.PTPState{"tr0": event.PTP_LOCKED}},
+		tBCAttributes: tBCProcessAttributes{activePort: "tr0", trIfaceNames: []string{"tr0"}},
 		sourceQualification: &sourceQualificationRuntime{apply: func(bool) error {
 			if fail {
 				return errors.New("pin update failed")
@@ -260,6 +261,11 @@ func TestSourceQualificationParsedPipeline(t *testing.T) {
 	clk, err := clock.NewTBC("ptp4l.0.config", cm.GetUtcOffset, &pmc.MockClient{}, "ptp4.1.config")
 	require.NoError(t, err)
 	require.NoError(t, cm.AddClock(clk))
+	// Source loss is now parent-dataset-driven; point the parent data set at a
+	// remote grandmaster so the offset qualification can proceed.
+	clk.AddEvent(event.Event{Source: event.PMC, CfgName: "ptp4l.0.config", Data: &event.ParentDSData{
+		ParentDataSet: protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6},
+	}})
 	var hooks []string
 	plugins := &plugin.PluginManager{Plugins: map[string]*plugin.Plugin{
 		"observer": {AfterRunPTPCommand: func(_ *interface{}, _ *ptpv1.PtpProfile, command string) error {
@@ -272,7 +278,7 @@ func TestSourceQualificationParsedPipeline(t *testing.T) {
 		nodeProfile: profile, clockType: event.TBC, logParser: parser.NewPTP4LExtractor(), ptpClockThreshold: getPTPThreshold(profile),
 		ifaces: config.IFaces{{Name: "tr0"}}, pm: plugins,
 		dn:            &Daemon{processManager: &ProcessManager{clockMgr: cm}},
-		tBCAttributes: tBCProcessAttributes{trPortsConfigFile: "ptp4l.0.config", trIfaceNames: []string{"tr0"}, perPortState: map[string]event.PTPState{}, offsetThreshold: 1},
+		tBCAttributes: tBCProcessAttributes{trPortsConfigFile: "ptp4l.0.config", trIfaceNames: []string{"tr0"}, offsetThreshold: 1},
 	}
 	policy, err := resolveSourceQualificationPolicy(profile)
 	require.NoError(t, err)
@@ -303,7 +309,7 @@ func TestSourceQualificationParsedPipeline(t *testing.T) {
 	p.processOutput("another unrelated diagnostic")
 	require.True(t, readiness(), "without a new snapshot, retain the last evaluated readiness")
 	p.processOutput("ptp4l[4268780.809]: [ptp4l.0.config] port 1: SLAVE to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES")
-	require.False(t, readiness())
+	require.True(t, readiness(), "a port leaving SLAVE is not a source-loss signal")
 	p.invalidateSourceQualification()
 	require.False(t, readiness())
 	require.Equal(t, []string{"tbc-ho-entry", "tbc-ho-exit", "tbc-ho-entry"}, hooks)
@@ -320,6 +326,11 @@ func attachQualificationClock(t *testing.T, p *ptpProcess, policy utils.Qualific
 	generation, err := cm.ConfigureSourceQualification(p.configName, p.tBCAttributes.trIfaceNames, policy)
 	require.NoError(t, err)
 	p.sourceQualification.generation = generation
+	// Source loss is now parent-dataset-driven; point the parent data set at a
+	// remote grandmaster so the offset qualification can proceed.
+	clk.AddEvent(event.Event{Source: event.PMC, CfgName: p.configName, Data: &event.ParentDSData{
+		ParentDataSet: protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6},
+	}})
 	p.sourceQualification.ctx = startQualificationClock(t, cm)
 	return cm
 }
@@ -339,6 +350,11 @@ func TestSourceQualificationHardwareDoesNotBlockEventPipeline(t *testing.T) {
 	clk, err := clock.NewTBC("ptp4l.0.config", cm.GetUtcOffset, &pmc.MockClient{}, "ptp4.1.config")
 	require.NoError(t, err)
 	require.NoError(t, cm.AddClock(clk))
+	// Source loss is now parent-dataset-driven; point the parent data set at a
+	// remote grandmaster so the offset qualification can proceed.
+	clk.AddEvent(event.Event{Source: event.PMC, CfgName: "ptp4l.0.config", Data: &event.ParentDSData{
+		ParentDataSet: protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6},
+	}})
 	generation, err := cm.ConfigureSourceQualification("ptp4l.0.config", []string{"tr0"}, utils.QualificationConfig{
 		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
 	require.NoError(t, err)

@@ -217,7 +217,7 @@ func TestUpdateTSCState(t *testing.T) {
 		bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_LOCKED, 10, false))
 		fillBCDataWindows(bc, 10)
 		bc.AddEvent(makeTBCEvent(event.DPLL, event.PTP_LOCKED, 10, false))
-		return bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{ParentDataSet: protocol.ParentDataSet{GrandmasterClockClass: 6}}})
+		return bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{ParentDataSet: protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6}}})
 	}
 
 	t.Run("FREERUN", func(t *testing.T) {
@@ -234,6 +234,7 @@ func TestUpdateTSCState(t *testing.T) {
 	t.Run("LOCKED to HOLDOVER", func(t *testing.T) {
 		bc := newClock(t)
 		require.Equal(t, event.PTP_LOCKED, lock(bc).State)
+		setPTPSourceLost(bc)
 		state := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		assert.Equal(t, event.PTP_HOLDOVER, state.State)
 		assert.Equal(t, fbprotocol.ClockClassSlaveOnly, state.ClockClass)
@@ -241,6 +242,7 @@ func TestUpdateTSCState(t *testing.T) {
 	t.Run("HOLDOVER in-spec to out-of-spec", func(t *testing.T) {
 		bc := newClock(t)
 		require.Equal(t, event.PTP_LOCKED, lock(bc).State)
+		setPTPSourceLost(bc)
 		holdover := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		require.Equal(t, event.PTP_HOLDOVER, holdover.State)
 		require.Equal(t, fbprotocol.ClockClassSlaveOnly, holdover.ClockClass)
@@ -1084,37 +1086,50 @@ func TestAddEvent_SourceLostPropagation(t *testing.T) {
 	}
 }
 
-func TestIsSourceLostBC_StaleDetailFixed(t *testing.T) {
-	now := time.Now().UnixMilli()
-
-	t.Run("stale LOCKED detail on other iface keeps isSourceLostBC false (no cross-hardware bleeding)", func(t *testing.T) {
-		ptp4lData := &event.Data{
-			ProcessName: event.PTP4l,
-			Details: []*event.DataDetails{
-				{IFace: testEno8903, State: event.PTP_LOCKED, SourceLost: false, Time: now - 5000},
-				{IFace: testEno8703, State: event.PTP_LOCKED, SourceLost: false, Time: now - 3000},
-			},
-		}
-		dpllData := &event.Data{
-			ProcessName: event.DPLL,
-			Details: []*event.DataDetails{
-				{IFace: testEno8703, State: event.PTP_LOCKED, Time: now},
-			},
-		}
-
+func TestIsPTPSourceLost(t *testing.T) {
+	newBC := func() *TBC {
 		bc := newPMCTestTBCClock(nil)
-		bc.data = []*event.Data{ptp4lData, dpllData}
+		bc.leadingClockData.clockID = testClockID
+		return bc
+	}
 
-		assert.False(t, bc.isSourceLostBC(), "before source-lost event, ptpLost should be false")
+	t.Run("nil parent data set is lost", func(t *testing.T) {
+		bc := newBC()
+		bc.leadingClockData.upstreamParentDataSet = nil
+		assert.True(t, bc.isPTPSourceLost())
+	})
 
-		ptp4lData.AddEvent(event.Event{
-			Source: event.PTP4l,
-			IFace:  testEno8703,
-			Time:   now,
-			Data:   &event.StateData{State: event.PTP_FREERUN, SourceLost: true},
-		})
+	t.Run("empty grandmaster identity is lost", func(t *testing.T) {
+		bc := newBC()
+		bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{}
+		assert.True(t, bc.isPTPSourceLost())
+	})
 
-		assert.False(t, bc.isSourceLostBC(), "stale LOCKED detail on other iface prevents ptpLost")
+	t.Run("own grandmaster identity is lost", func(t *testing.T) {
+		bc := newBC()
+		bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{
+			GrandmasterIdentity:   testClockID,
+			GrandmasterClockClass: uint8(protocol.ClockClassFreerun),
+		}
+		assert.True(t, bc.isPTPSourceLost())
+	})
+
+	t.Run("remote grandmaster with freerun class is lost", func(t *testing.T) {
+		bc := newBC()
+		bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{
+			GrandmasterIdentity:   "aabbcc.fffe.ddeeff",
+			GrandmasterClockClass: uint8(protocol.ClockClassFreerun),
+		}
+		assert.True(t, bc.isPTPSourceLost())
+	})
+
+	t.Run("remote grandmaster with valid class is not lost", func(t *testing.T) {
+		bc := newBC()
+		bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{
+			GrandmasterIdentity:   "aabbcc.fffe.ddeeff",
+			GrandmasterClockClass: 6,
+		}
+		assert.False(t, bc.isPTPSourceLost())
 	})
 }
 
@@ -1174,6 +1189,7 @@ func TestUpdateBCState(t *testing.T) {
 	t.Run("LOCKED to HOLDOVER via source lost", func(t *testing.T) {
 		bc, _ := newLockedTBCClock()
 
+		setPTPSourceLost(bc)
 		result := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		assert.Equal(t, event.PTP_HOLDOVER, result.State, "should transition to HOLDOVER")
 		assert.Equal(t, fbprotocol.ClockClass(135), result.ClockClass, "clockClass should be 135 (holdover in-spec)")
@@ -1182,9 +1198,11 @@ func TestUpdateBCState(t *testing.T) {
 	t.Run("HOLDOVER to LOCKED", func(t *testing.T) {
 		bc, _ := newLockedTBCClock()
 
+		setPTPSourceLost(bc)
 		result := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		assert.Equal(t, event.PTP_HOLDOVER, result.State, "setup: should be HOLDOVER")
 
+		setPTPSourcePresent(bc)
 		bc.leadingClockData.inSyncFilter.Reset()
 		bc.AddEvent(makeTBCEvent(event.DPLL, event.PTP_LOCKED, 5, false))
 		fillBCDataWindows(bc, 5)
@@ -1195,6 +1213,7 @@ func TestUpdateBCState(t *testing.T) {
 	t.Run("HOLDOVER to FREERUN via offset", func(t *testing.T) {
 		bc, _ := newLockedTBCClock()
 
+		setPTPSourceLost(bc)
 		result := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		assert.Equal(t, event.PTP_HOLDOVER, result.State, "setup: should be HOLDOVER")
 
@@ -1206,6 +1225,7 @@ func TestUpdateBCState(t *testing.T) {
 	t.Run("HOLDOVER in-spec to out-of-spec", func(t *testing.T) {
 		bc, _ := newLockedTBCClock()
 
+		setPTPSourceLost(bc)
 		result := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 		assert.Equal(t, event.PTP_HOLDOVER, result.State, "setup: should be HOLDOVER")
 		assert.Equal(t, fbprotocol.ClockClass(135), result.ClockClass, "setup: should be in-spec (135)")
@@ -1267,6 +1287,7 @@ func TestUpdateBCStateHoldoverDisabled(t *testing.T) {
 			rec.messages = nil
 
 			// Upstream lost while the cached leading DPLL is still locked with a small offset.
+			setPTPSourceLost(bc)
 			result := bc.AddEvent(makeTBCEvent(event.PTP4lProcessName, event.PTP_FREERUN, 10, true))
 			assert.Equal(t, tt.wantState, result.State)
 			assert.Equal(t, tt.wantClass, result.ClockClass)
@@ -1379,6 +1400,7 @@ func TestTBCClock_ParentDSUpdate(t *testing.T) {
 		assert.Equal(t, event.PTP_LOCKED, bc.syncState.State, "precondition: clock must be LOCKED")
 
 		bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{ParentDataSet: protocol.ParentDataSet{
+			GrandmasterIdentity:   "aabbcc.fffe.ddeeff",
 			GrandmasterClockClass: 6,
 		}}})
 
@@ -1392,6 +1414,7 @@ func TestTBCClock_ParentDSUpdate(t *testing.T) {
 	t.Run("LOCKED clock sends IPC on clock class change", func(t *testing.T) {
 		bc, rio := newLockedTBCClock()
 		bc.AddEvent(event.Event{Source: event.PMC, Data: &event.ParentDSData{ParentDataSet: protocol.ParentDataSet{
+			GrandmasterIdentity:   "aabbcc.fffe.ddeeff",
 			GrandmasterClockClass: 7,
 		}}})
 
@@ -1433,6 +1456,28 @@ func makeTBCEvent(process event.EventSource, state event.PTPState, offset int64,
 	}
 }
 
+const testClockID = "001122.fffe.334455"
+
+// setPTPSourceLost marks the upstream PTP source as lost by making the parent
+// data set grandmaster our own clock identity (freerun class 248).
+func setPTPSourceLost(bc *TBC) {
+	bc.leadingClockData.clockID = testClockID
+	bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{
+		GrandmasterIdentity:   testClockID,
+		GrandmasterClockClass: uint8(protocol.ClockClassFreerun),
+	}
+}
+
+// setPTPSourcePresent marks the upstream PTP source as present by pointing the
+// parent data set at a remote grandmaster.
+func setPTPSourcePresent(bc *TBC) {
+	bc.leadingClockData.clockID = testClockID
+	bc.leadingClockData.upstreamParentDataSet = &protocol.ParentDataSet{
+		GrandmasterIdentity:   "aabbcc.fffe.ddeeff",
+		GrandmasterClockClass: 6,
+	}
+}
+
 func tbcLeadingClockParams() *LeadingClockParams {
 	p := &LeadingClockParams{
 		leadingInterface:         testTBCIface,
@@ -1440,7 +1485,7 @@ func tbcLeadingClockParams() *LeadingClockParams {
 		inSyncConditionTimes:     1,
 		toFreeRunThreshold:       1500,
 		MaxInSpecOffset:          500,
-		upstreamParentDataSet:    &protocol.ParentDataSet{},
+		upstreamParentDataSet:    &protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6},
 		upstreamTimeProperties:   &protocol.TimePropertiesDS{},
 		downstreamParentDataSet:  &protocol.ParentDataSet{},
 		downstreamTimeProperties: &protocol.TimePropertiesDS{},

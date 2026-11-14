@@ -9,6 +9,7 @@ import (
 	parserconstants "github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser/constants"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/pmc"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/process"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/protocol"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -53,6 +54,11 @@ func qualificationPublisher(t *testing.T, m *clockmgr.ClockManager) func(bool) {
 	clk, err := clock.NewTBC("ptp4l.0.config", m.GetUtcOffset, &pmc.MockClient{}, "ptp4.1.config")
 	require.NoError(t, err)
 	require.NoError(t, m.AddClock(clk))
+	// Source loss is now parent-dataset-driven; point the parent data set at a
+	// remote grandmaster so the offset qualification can proceed.
+	clk.AddEvent(event.Event{Source: event.PMC, CfgName: "ptp4l.0.config", Data: &event.ParentDSData{
+		ParentDataSet: protocol.ParentDataSet{GrandmasterIdentity: "aabbcc.fffe.ddeeff", GrandmasterClockClass: 6},
+	}})
 	generation, err := m.ConfigureSourceQualification("ptp4l.0.config", []string{"tr0"}, utils.QualificationConfig{
 		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
 	require.NoError(t, err)

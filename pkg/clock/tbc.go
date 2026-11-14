@@ -207,6 +207,13 @@ func (c *TBC) ObserveSource(ev event.Event, observation *event.PTPSourceObservat
 	if q == nil || ev.Source != event.PTP4l || ev.CfgName != c.cfgName || observation.Generation != q.generation {
 		return event.SourceQualification{}
 	}
+
+	// Source loss is driven by the parent data set grandmaster identity, not by
+	// port transitions or the servo state.
+	if c.isPTPSourceLost() {
+		return event.SourceQualification{SourceType: event.PTP4l, IFace: q.lastSelectedPort, Generation: q.generation, QualificationResult: q.state.Reset()}
+	}
+
 	var result utils.QualificationResult
 	switch {
 	case observation.SourceLost:
@@ -217,26 +224,24 @@ func (c *TBC) ObserveSource(ev event.Event, observation *event.PTPSourceObservat
 		if !slices.Contains(q.configuredUpstreamPorts, ev.IFace) || role == parserconstants.PortRoleUnknown {
 			return event.SourceQualification{}
 		}
-		if role == parserconstants.PortRoleSlave {
-			if q.lastSelectedPort == ev.IFace && q.available {
-				return event.SourceQualification{}
-			}
-			q.lastSelectedPort, q.available = ev.IFace, true
-			// Old upstream details must not masquerade as a still-locked source.
-			d := c.GetData(event.PTP4l)
-			d.Details, d.Window = nil, utils.NewWindow(event.WindowSize)
-		} else if q.lastSelectedPort == ev.IFace && q.available {
-			q.available = false
-		} else {
+		if role != parserconstants.PortRoleSlave {
+			// A port leaving SLAVE is not a source-loss signal.
 			return event.SourceQualification{}
 		}
-		result = q.state.Reset()
+		if q.lastSelectedPort == ev.IFace && q.available {
+			return event.SourceQualification{}
+		}
+		q.lastSelectedPort, q.available = ev.IFace, true
+		// Old upstream details must not masquerade as a still-locked source.
+		d := c.GetData(event.PTP4l)
+		d.Details, d.Window = nil, utils.NewWindow(event.WindowSize)
+		result = utils.QualificationResult{Source: q.source(), Qualified: q.state.Qualified()}
 	default:
 		if observation.ServoState == "" || (ev.IFace != "" && ev.IFace != "master" && ev.IFace != q.lastSelectedPort) {
 			return event.SourceQualification{}
 		}
 		result = q.state.Evaluate(utils.QualificationSample{Source: q.source(), Offset: observation.Offset, ServoState: observation.ServoState,
-			SourceAvailable: q.available && (observation.ServoState == "s2" || observation.ServoState == "s3")})
+			SourceAvailable: q.available})
 	}
 	return event.SourceQualification{SourceType: event.PTP4l, IFace: q.lastSelectedPort, Generation: q.generation, QualificationResult: result}
 }
@@ -665,17 +670,10 @@ func (c *TBC) inSyncCondition() bool {
 }
 
 func (c *TBC) isSourceLostBC() bool {
-	ptpLost := true
+	ptpLost := c.isPTPSourceLost()
 	dpllLost := false
 	dpllLostIface := ""
 	for _, d := range c.data {
-		if d.ProcessName == event.PTP4l {
-			for _, dd := range d.Details {
-				if dd.State == event.PTP_LOCKED {
-					ptpLost = false
-				}
-			}
-		}
 		if d.ProcessName == event.DPLL {
 			glog.V(14).Infof("isSourceLostBC[%s]", c.cfgName)
 			for _, dd := range d.Details {
@@ -696,6 +694,29 @@ func (c *TBC) isSourceLostBC() bool {
 			return "NOT LOST"
 		}(), ptpLost, dpllLost, dpllLostIface)
 	return ptpLost || dpllLost
+}
+
+// isPTPSourceLost reports whether the upstream PTP source is lost. The source is
+// lost when the PARENT_DATA_SET has no grandmaster (we never acquired an
+// upstream), when the grandmaster is our own clock (we became our own GM because
+// no upstream is available), or when the grandmaster reports freerun clock class
+// 248. A BMCA switchover between upstream ports keeps the same remote grandmaster
+// identity, so it does not register as loss.
+func (c *TBC) isPTPSourceLost() bool {
+	pds := c.leadingClockData.upstreamParentDataSet
+	if pds == nil || pds.GrandmasterIdentity == "" {
+		return true
+	}
+	if c.leadingClockData.clockID != "" && pds.GrandmasterIdentity == c.leadingClockData.clockID {
+		return true
+	}
+	return pds.GrandmasterClockClass == uint8(protocol.ClockClassFreerun)
+}
+
+// IsPTPSourceLost reports whether the upstream PTP source is lost. Exposed so the
+// daemon can apply the hardwareconfig lost condition from the parent data set.
+func (c *TBC) IsPTPSourceLost() bool {
+	return c.isPTPSourceLost()
 }
 
 func (c *TBC) getLargestOffset() int64 {

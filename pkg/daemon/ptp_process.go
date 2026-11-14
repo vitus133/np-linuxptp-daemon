@@ -220,45 +220,23 @@ func (p *ptpProcess) sendPtp4lOffsetEvent() {
 }
 
 // processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig.
-// Tracks per-port state and derives aggregate state:
-//   - Any upstream port in SLAVE -> aggregate LOCKED
-//   - All upstream ports lost SLAVE -> aggregate LOST (enter holdover)
-//
-// During a switchover (one port loses SLAVE, BMCA promotes the other), there is a
-// brief gap where no port is SLAVE. Entering holdover during this gap is correct
-// because the DPLL is not being disciplined by PTP. When the new port reaches SLAVE,
-// the offset filter will confirm stability before exiting holdover.
+// Locked is reported when an upstream port reaches SLAVE and the offset filter
+// confirms stability. Holdover is entered when the parent data set indicates the
+// upstream grandmaster is lost (not from port transitions).
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
-	// TODO: clock objec?
-
 	portName, conditionType := p.tbcStateDetector.DetectStateChange(output)
 
 	switch conditionType {
 	case hardwareconfig.ConditionTypeLocked:
-		p.tBCAttributes.perPortState[portName] = event.PTP_LOCKED
 		p.tBCAttributes.activePort = portName
 		p.tBCAttributes.lastReportedState = event.PTP_LOCKED
 		glog.Infof("T-BC port %s LOCKED (reported state)", portName)
 		p.tBCAttributes.offsetFilter = utils.NewWindow(offsetFilterSize)
+	}
 
-	case hardwareconfig.ConditionTypeLost:
-		p.tBCAttributes.perPortState[portName] = event.PTP_FREERUN
-		glog.Infof("T-BC port %s lost SLAVE", portName)
-
-		if p.tBCAttributes.allPortsLost() {
-			if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(p.nodeProfile, hardwareconfig.ConditionTypeLost); err != nil {
-				glog.Errorf("Failed to apply hardware config for '%s' condition: %v", hardwareconfig.ConditionTypeLost, err)
-			} else {
-				glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
-			}
-
-			p.tBCAttributes.lastReportedState = event.PTP_FREERUN
-			p.tBCAttributes.activePort = ""
-			p.tBCAttributes.offsetFilter = nil
-			glog.Info("T-BC all upstream ports lost - MOVE TO HOLDOVER")
-			p.sendPtp4lStateEvent()
-			p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
-		}
+	// Source loss is driven by the parent data set grandmaster identity.
+	if p.ptpSourceLost() && p.tBCAttributes.lastAppliedState != event.PTP_HOLDOVER {
+		p.enterTBCServoHoldover("no upstream grandmaster")
 	}
 
 	p.checkOffsetFilterAndTransition(func() {
@@ -270,6 +248,31 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 		p.sendPtp4lStateEvent()
 		// ts2phc start is now driven by conditions, not by explicit notification
 	})
+}
+
+// ptpSourceLost reports whether the T-BC clock has lost its upstream PTP source,
+// based on the parent data set grandmaster identity.
+func (p *ptpProcess) ptpSourceLost() bool {
+	if p.dn == nil || p.dn.processManager == nil || p.dn.processManager.clockMgr == nil {
+		return false
+	}
+	return p.dn.processManager.clockMgr.IsPTPSourceLost(p.configName)
+}
+
+// enterTBCServoHoldover applies the hardwareconfig lost condition and reports the
+// aggregate holdover state.
+func (p *ptpProcess) enterTBCServoHoldover(reason string) {
+	glog.Infof("T-BC MOVE TO HOLDOVER (%s)", reason)
+	if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(p.nodeProfile, hardwareconfig.ConditionTypeLost); err != nil {
+		glog.Errorf("Failed to apply hardware config for '%s' condition: %v", hardwareconfig.ConditionTypeLost, err)
+	} else {
+		glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
+	}
+	p.tBCAttributes.lastReportedState = event.PTP_FREERUN
+	p.tBCAttributes.activePort = ""
+	p.tBCAttributes.offsetFilter = nil
+	p.sendPtp4lStateEvent()
+	p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
 }
 
 // processTBCTransitionLegacy is the original implementation as ultimate fallback
@@ -855,7 +858,6 @@ func (p *ptpProcess) sendPtp4lStateEvent() {
 type tBCProcessAttributes struct {
 	trPortsConfigFile string
 	trIfaceNames      []string
-	perPortState      map[string]event.PTPState
 	activePort        string
 	lastReportedState event.PTPState
 	lastAppliedState  event.PTPState
@@ -874,15 +876,6 @@ func (t *tBCProcessAttributes) activeTRPort() string {
 		return t.trIfaceNames[0]
 	}
 	return ""
-}
-
-func (t *tBCProcessAttributes) allPortsLost() bool {
-	for _, state := range t.perPortState {
-		if state == event.PTP_LOCKED {
-			return false
-		}
-	}
-	return true
 }
 
 func buildPtpCmdLine(name, configPath string, opts *string, nodeProfile *ptpv1.PtpProfile) string {
@@ -1098,10 +1091,6 @@ func NewPtp4lProcess(env ptpProcessEnv) (*ptpProcess, error) {
 	}
 	if len(env.upstreamPorts) > 0 && env.clockType == event.TBC {
 		p.tBCAttributes.trIfaceNames = env.upstreamPorts
-		p.tBCAttributes.perPortState = make(map[string]event.PTPState, len(env.upstreamPorts))
-		for _, port := range env.upstreamPorts {
-			p.tBCAttributes.perPortState[port] = event.PTP_NOTSET
-		}
 		sInSyncConditionTh, thresholdConfigured := env.nodeProfile.PtpSettings["inSyncConditionThreshold"]
 		if thresholdConfigured {
 			p.tBCAttributes.offsetThreshold, err = strconv.ParseFloat(sInSyncConditionTh, 64)
