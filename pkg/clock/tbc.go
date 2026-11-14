@@ -730,13 +730,8 @@ func (c *TBC) getLargestOffset() int64 {
 			continue
 		}
 		if !d.Window.IsFull() {
-			// A partially-filled window is an unknown offset, not an out-of-spec
-			// one. Skip it so the remaining sources (e.g. the leading NIC's
-			// ts2phc offset) still report a real value while the window refills
-			// after a holdover exit, instead of poisoning inSync/metrics with
-			// FaultyPhaseOffset.
-			glog.V(4).Infof("skipping %s offset: window not full", d.ProcessName)
-			continue
+			glog.Infof("Largest offset %d (window not full for %s)", FaultyPhaseOffset, d.ProcessName)
+			return FaultyPhaseOffset
 		}
 		for _, dd := range d.Details {
 			if dd.Time < staleTime {
