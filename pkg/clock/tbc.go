@@ -207,13 +207,6 @@ func (c *TBC) ObserveSource(ev event.Event, observation *event.PTPSourceObservat
 	if q == nil || ev.Source != event.PTP4l || ev.CfgName != c.cfgName || observation.Generation != q.generation {
 		return event.SourceQualification{}
 	}
-
-	// Source loss is driven by the parent data set grandmaster identity, not by
-	// port transitions or the servo state.
-	if c.isPTPSourceLost() {
-		return event.SourceQualification{SourceType: event.PTP4l, IFace: q.lastSelectedPort, Generation: q.generation, QualificationResult: q.state.Reset()}
-	}
-
 	var result utils.QualificationResult
 	switch {
 	case observation.SourceLost:
