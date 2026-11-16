@@ -213,10 +213,7 @@ func (p *ptpProcess) sendPtp4lOffsetEvent() {
 }
 
 // processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig.
-// Tracks per-port state and derives aggregate state:
-//   - Any upstream port in SLAVE -> aggregate LOCKED
-//   - All upstream ports lost SLAVE -> aggregate FREERUN; wait for the leading
-//     ptp4l config's BMCA local-best-master result before entering holdover.
+// The selected port is tracked for offset/event labeling; BMCA determines source loss.
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 	// TODO: clock object?
 
@@ -230,7 +227,6 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 
 	switch conditionType {
 	case hardwareconfig.ConditionTypeLocked:
-		p.tBCAttributes.perPortState[portName] = event.PTP_LOCKED
 		p.tBCAttributes.activePort = portName
 		p.tBCAttributes.lastReportedState = event.PTP_LOCKED
 		glog.Infof("T-BC port %s LOCKED (reported state)", portName)
@@ -255,6 +251,9 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 			p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
 			return
 		}
+		// A port leaving SLAVE only updates port/role state; it cannot establish
+		// that BMCA has selected the local clock.
+		return
 	}
 
 	p.checkOffsetFilterAndTransition(func() {
@@ -851,7 +850,6 @@ func (p *ptpProcess) sendPtp4lStateEvent() {
 type tBCProcessAttributes struct {
 	trPortsConfigFile string
 	trIfaceNames      []string
-	perPortState      map[string]event.PTPState
 	activePort        string
 	lastReportedState event.PTPState
 	lastAppliedState  event.PTPState
@@ -870,15 +868,6 @@ func (t *tBCProcessAttributes) activeTRPort() string {
 		return t.trIfaceNames[0]
 	}
 	return ""
-}
-
-func (t *tBCProcessAttributes) allPortsLost() bool {
-	for _, state := range t.perPortState {
-		if state == event.PTP_LOCKED {
-			return false
-		}
-	}
-	return true
 }
 
 func buildPtpCmdLine(name, configPath string, opts *string, nodeProfile *ptpv1.PtpProfile) string {
@@ -1094,10 +1083,6 @@ func NewPtp4lProcess(env ptpProcessEnv) (*ptpProcess, error) {
 	}
 	if len(env.upstreamPorts) > 0 && env.clockType == event.TBC {
 		p.tBCAttributes.trIfaceNames = env.upstreamPorts
-		p.tBCAttributes.perPortState = make(map[string]event.PTPState, len(env.upstreamPorts))
-		for _, port := range env.upstreamPorts {
-			p.tBCAttributes.perPortState[port] = event.PTP_NOTSET
-		}
 		sInSyncConditionTh, thresholdConfigured := env.nodeProfile.PtpSettings["inSyncConditionThreshold"]
 		if thresholdConfigured {
 			p.tBCAttributes.offsetThreshold, err = strconv.ParseFloat(sInSyncConditionTh, 64)
