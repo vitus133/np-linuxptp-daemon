@@ -17,6 +17,12 @@ var (
 	// ptp4l[4268779.809]: [ptp4l.3.config] port 3: UNCALIBRATED to MASTER on RS_MASTER
 	// ptp4l[4268779.809]: [ptp4l.4.config] port 4: FAULT_DETECTED
 	// ptp4l[412707.219]: [ptp4l.0.config:5] port 11 (ens8f2): LISTENING to MASTER on ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES
+	// The local clock identity is opaque; consumers select the instance by config_name.
+	ptp4lBMCARegex = regexp.MustCompile(
+		`^ptp4l\[(?P<timestamp>\d+\.?\d*)\]:` +
+			`\s+\[(?P<config_name>.*\.\d+\.config):?(?P<serverity>\d*)\]` +
+			`\s+selected local clock .* as best master$`,
+	)
 	ptp4lEventRegex = regexp.MustCompile(
 		`^ptp4l\[(?P<timestamp>\d+\.?\d*)\]:` +
 			`\s+\[(?P<config_name>.*\.\d+\.config):?(?P<serverity>\d*)\]` +
@@ -147,6 +153,16 @@ func NewPTP4LExtractor() *BaseMetricsExtractor[*ptp4lParsed] {
 		ProcessNameStr: event.Ptp4lProcessName,
 		NewParsed:      func() *ptp4lParsed { return &ptp4lParsed{} },
 		RegexExtractorPairs: []RegexExtractorPair[*ptp4lParsed]{
+			{
+				Regex: ptp4lBMCARegex,
+				Extractor: func(parsed *ptp4lParsed) (*Metrics, *PTPEvent, error) {
+					return nil, &PTPEvent{
+						ConfigName:        parsed.ConfigName,
+						BMCASelectedLocal: true,
+						Raw:               parsed.Raw,
+					}, nil
+				},
+			},
 			{
 				Regex: ptp4lEventRegex,
 				Extractor: func(parsed *ptp4lParsed) (*Metrics, *PTPEvent, error) {

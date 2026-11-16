@@ -213,24 +213,17 @@ func (c *TBC) ObserveSource(ev event.Event, observation *event.PTPSourceObservat
 		q.available = false
 		result = q.state.Reset()
 	case observation.PortRole != nil:
+		// Port-role changes update source identity only; offset samples own qualification history.
 		role := *observation.PortRole
 		if !slices.Contains(q.configuredUpstreamPorts, ev.IFace) || role == parserconstants.PortRoleUnknown {
 			return event.SourceQualification{}
 		}
-		if role == parserconstants.PortRoleSlave {
-			if q.lastSelectedPort == ev.IFace && q.available {
-				return event.SourceQualification{}
-			}
-			q.lastSelectedPort, q.available = ev.IFace, true
-			// Old upstream details must not masquerade as a still-locked source.
-			d := c.GetData(event.PTP4l)
-			d.Details, d.Window = nil, utils.NewWindow(event.WindowSize)
-		} else if q.lastSelectedPort == ev.IFace && q.available {
-			q.available = false
-		} else {
+		if role != parserconstants.PortRoleSlave {
 			return event.SourceQualification{}
 		}
-		result = q.state.Reset()
+		q.lastSelectedPort, q.available = ev.IFace, true
+		q.state.RebindSource(q.source())
+		return event.SourceQualification{}
 	default:
 		if observation.ServoState == "" || (ev.IFace != "" && ev.IFace != "master" && ev.IFace != q.lastSelectedPort) {
 			return event.SourceQualification{}

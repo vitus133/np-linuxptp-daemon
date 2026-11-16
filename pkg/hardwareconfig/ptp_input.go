@@ -35,14 +35,20 @@ func NewPTPStateDetector(hcm *HardwareConfigManager) *PTPStateDetector {
 	return psd
 }
 
-// DetectStateChange processes a PTP4L log line and returns port-aware state change information.
-// Returns the port name and condition type ("locked", "lost") for the port that changed state.
-// Returns ("", "") when the log line contains no relevant state change or the port is not monitored.
+// DetectStateChange processes a PTP4L log line and returns port-aware state changes or a
+// leading-config local-best-master result. Port changes return their port name and condition
+// type ("locked", "lost"); a local-best-master result returns an empty port name and "lost".
 // TODO: replace by pmc state monitor
-func (psd *PTPStateDetector) DetectStateChange(logLine string) (portName string, conditionType string) {
+func (psd *PTPStateDetector) DetectStateChange(logLine string, leadingConfigNames ...string) (portName string, conditionType string) {
 	_, event, err := psd.ptp4lExtractor.Extract(logLine)
 	if err != nil || event == nil {
 		return "", ""
+	}
+	if event.BMCASelectedLocal {
+		if len(leadingConfigNames) == 0 || leadingConfigNames[0] == "" || event.ConfigName != leadingConfigNames[0] {
+			return "", ""
+		}
+		return "", ConditionTypeLost
 	}
 
 	portName = psd.extractPortName(logLine)

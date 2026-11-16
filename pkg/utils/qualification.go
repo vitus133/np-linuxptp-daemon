@@ -105,6 +105,16 @@ func (s *QualificationState) Configure(config QualificationConfig) error {
 // Qualified returns evaluated source readiness, not aggregate clock lock.
 func (s *QualificationState) Qualified() bool { return s.qualified }
 
+// RebindSource updates the selected source identity without resetting readiness
+// or offset history. Use it when an upstream port changes but the clock has not
+// transitioned
+func (s *QualificationState) RebindSource(source QualificationSource) {
+	if s.filter == nil || source == nil {
+		return
+	}
+	s.source = source
+}
+
 // Reset invalidates readiness and all source-specific history, retaining policy.
 func (s *QualificationState) Reset() QualificationResult {
 	wasQualified := s.qualified

@@ -139,21 +139,14 @@ func (p *ptpProcess) prepareTBCResources() {
 // tBCTransitionCheck performs ultra-fast T-BC transition detection (called 16x/second)
 // Uses cached values and optimized processing to minimize performance impact
 func (p *ptpProcess) tBCTransitionCheck(output string, pm *plugin.PluginManager) {
-	if p.sourceQualification != nil {
-		// Parsed source observations already drive the opted-in policy. Never
-		// also run the per-log-line legacy moving-average gate.
-		return
-	}
 	// TODO: I thinks belongs on a clock object.
 
 	// Use cached hardwareconfig availability (no expensive lookups)
 	if vTbcHasHardwareConfig && p.tbcStateDetector != nil {
-		// Hardwareconfig path: Use cached PTP state detector
 		p.processTBCTransitionHardwareConfig(output)
-	} else {
-		// Legacy path: Use optimized string matching
-		p.processTBCTransitionLegacy(output, pm)
+		return
 	}
+	p.processTBCTransitionLegacy(output, pm)
 }
 
 // checkOffsetFilterAndTransition checks if offset filter conditions are met and transitions to LOCKED state
@@ -161,7 +154,7 @@ func (p *ptpProcess) tBCTransitionCheck(output string, pm *plugin.PluginManager)
 // It collects offset samples and only transitions when the filter is full and mean offset is below threshold.
 // The transitionAction callback is called when conditions are met to perform the actual transition.
 func (p *ptpProcess) checkOffsetFilterAndTransition(transitionAction func()) {
-	// TODO: Clock object?
+	// TODO: Consider moving to T-BC clock object
 
 	if p.configName != p.tBCAttributes.trPortsConfigFile || p.tBCAttributes.offsetFilter == nil {
 		return
@@ -222,16 +215,18 @@ func (p *ptpProcess) sendPtp4lOffsetEvent() {
 // processTBCTransitionHardwareConfig handles T-BC transitions using hardwareconfig.
 // Tracks per-port state and derives aggregate state:
 //   - Any upstream port in SLAVE -> aggregate LOCKED
-//   - All upstream ports lost SLAVE -> aggregate LOST (enter holdover)
-//
-// During a switchover (one port loses SLAVE, BMCA promotes the other), there is a
-// brief gap where no port is SLAVE. Entering holdover during this gap is correct
-// because the DPLL is not being disciplined by PTP. When the new port reaches SLAVE,
-// the offset filter will confirm stability before exiting holdover.
+//   - All upstream ports lost SLAVE -> aggregate FREERUN; wait for the leading
+//     ptp4l config's BMCA local-best-master result before entering holdover.
 func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
-	// TODO: clock objec?
+	// TODO: clock object?
 
-	portName, conditionType := p.tbcStateDetector.DetectStateChange(output)
+	leadingConfigName := ""
+	if p.clockType == event.TBC && p.nodeProfile != nil && p.nodeProfile.PtpSettings != nil &&
+		p.nodeProfile.PtpSettings["leadingInterface"] != "" && len(p.tBCAttributes.trIfaceNames) > 0 &&
+		p.configName != "" && p.configName == p.tBCAttributes.trPortsConfigFile {
+		leadingConfigName = p.tBCAttributes.trPortsConfigFile
+	}
+	portName, conditionType := p.tbcStateDetector.DetectStateChange(output, leadingConfigName)
 
 	switch conditionType {
 	case hardwareconfig.ConditionTypeLocked:
@@ -242,22 +237,23 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 		p.tBCAttributes.offsetFilter = utils.NewWindow(offsetFilterSize)
 
 	case hardwareconfig.ConditionTypeLost:
-		p.tBCAttributes.perPortState[portName] = event.PTP_FREERUN
-		glog.Infof("T-BC port %s lost SLAVE", portName)
-
-		if p.tBCAttributes.allPortsLost() {
+		if portName == "" {
+			if p.dn == nil || p.dn.hardwareConfigManager == nil {
+				glog.Error("Cannot apply T-BC lost condition for leading BMCA decision: hardware config manager is unavailable")
+				return
+			}
 			if err := p.dn.hardwareConfigManager.ApplyConditionForProfile(p.nodeProfile, hardwareconfig.ConditionTypeLost); err != nil {
 				glog.Errorf("Failed to apply hardware config for '%s' condition: %v", hardwareconfig.ConditionTypeLost, err)
-			} else {
-				glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
+				return
 			}
-
+			glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
 			p.tBCAttributes.lastReportedState = event.PTP_FREERUN
 			p.tBCAttributes.activePort = ""
 			p.tBCAttributes.offsetFilter = nil
-			glog.Info("T-BC all upstream ports lost - MOVE TO HOLDOVER")
+			glog.Info("T-BC leading BMCA selected local clock - MOVE TO HOLDOVER")
 			p.sendPtp4lStateEvent()
 			p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
+			return
 		}
 	}
 

@@ -97,6 +97,11 @@ func (p *ptpProcess) forwardSourceData(metrics *parser.Metrics, portEvent *parse
 		if port == "" && portEvent.PortID > 0 && portEvent.PortID <= len(p.ifaces) {
 			port = p.ifaces[portEvent.PortID-1].Name
 		}
+		if portEvent.Role == parserconstants.PortRoleSlave {
+			p.tBCAttributes.activePort = port
+		} else if p.tBCAttributes.activePort == port {
+			p.tBCAttributes.activePort = ""
+		}
 		p.observeSource(port, &event.PTPSourceObservation{PortRole: utils.ToPtr(portEvent.Role)})
 	}
 	// Summary/port-status lines are not fresh servo measurements.
