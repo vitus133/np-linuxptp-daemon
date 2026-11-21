@@ -88,6 +88,7 @@ type TBC struct {
 	// request, a Reset, or a replaced clock) is recognized as stale and dropped.
 	// It is only read and written on the serialized state loop.
 	announceToken         uint64
+	bmcaSelectedLocal     bool
 	ptpSource             *ptpSourceQualification
 	controlledPortsConfig string
 	isTTSC                bool
@@ -191,6 +192,13 @@ func (c *TBC) AddEvent(ev event.Event) SyncState {
 		}
 		return c.syncState
 	default:
+		if data, ok := ev.Data.(*event.StateData); ok && ev.Source == event.PTP4l && ev.CfgName == c.cfgName {
+			if data.BMCASelectedLocal {
+				c.bmcaSelectedLocal = true
+			} else if data.State == event.PTP_LOCKED && !data.SourceLost {
+				c.bmcaSelectedLocal = false
+			}
+		}
 		d := c.GetData(ev.Source)
 		d.AddEvent(ev)
 		d.UpdateState()
@@ -440,6 +448,7 @@ func (c *TBC) resetAggregate() {
 	}
 	c.overallSyncState = event.PTP_FREERUN
 	c.data = nil
+	c.bmcaSelectedLocal = false
 	// Advance the epoch so any downstream-announce fetch spawned before this
 	// Reset is discarded when its result comes back on the loop.
 	c.announceToken = nextAnnounceToken()
@@ -676,6 +685,9 @@ func (c *TBC) isSourceLostBC() bool {
 			}
 		}
 	}
+	// BMCA loss applies to the whole leading ptp4l instance, regardless of
+	// LOCKED details retained for previously selected ports.
+	ptpLost = ptpLost || c.bmcaSelectedLocal
 	glog.Infof("Source %s: ptpLost %t, dpllLost %t %s",
 		func() string {
 			if dpllLost || ptpLost {

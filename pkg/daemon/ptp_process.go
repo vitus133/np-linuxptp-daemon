@@ -244,10 +244,10 @@ func (p *ptpProcess) processTBCTransitionHardwareConfig(output string) {
 			}
 			glog.Infof("Successfully applied hardware config for '%s' condition", hardwareconfig.ConditionTypeLost)
 			p.tBCAttributes.lastReportedState = event.PTP_FREERUN
-			p.tBCAttributes.activePort = ""
 			p.tBCAttributes.offsetFilter = nil
 			glog.Info("T-BC leading BMCA selected local clock - MOVE TO HOLDOVER")
-			p.sendPtp4lStateEvent()
+			p.emitPtp4lStateEvent(true)
+			p.tBCAttributes.activePort = ""
 			p.tBCAttributes.lastAppliedState = event.PTP_HOLDOVER
 			return
 		}
@@ -821,6 +821,10 @@ func (p *ptpProcess) getPTPClockID() (string, error) {
 }
 
 func (p *ptpProcess) sendPtp4lStateEvent() {
+	p.emitPtp4lStateEvent(false)
+}
+
+func (p *ptpProcess) emitPtp4lStateEvent(bmcaSelectedLocal bool) {
 	// TODO refactor into Ptp4l process
 
 	clockID, err := p.getPTPClockID()
@@ -829,8 +833,7 @@ func (p *ptpProcess) sendPtp4lStateEvent() {
 		clockID = "" // Set to empty string if error occurs
 	}
 	_ = clockID // Ensure linter sees the variable as used
-	select {
-	case p.eventCh <- event.Event{
+	ev := event.Event{
 		Source:    event.PTP4l,
 		CfgName:   p.configName,
 		IFace:     p.tBCAttributes.activeTRPort(),
@@ -838,11 +841,14 @@ func (p *ptpProcess) sendPtp4lStateEvent() {
 		Time:      time.Now().UnixMilli(),
 		Reset:     false,
 		Data: &event.StateData{
-			State:      p.tBCAttributes.lastReportedState,
-			SourceLost: p.tBCAttributes.lastReportedState != event.PTP_LOCKED,
-			ClockID:    clockID,
+			State:             p.tBCAttributes.lastReportedState,
+			SourceLost:        p.tBCAttributes.lastReportedState != event.PTP_LOCKED,
+			ClockID:           clockID,
+			BMCASelectedLocal: bmcaSelectedLocal,
 		},
-	}:
+	}
+	select {
+	case p.eventCh <- ev:
 	default:
 	}
 }

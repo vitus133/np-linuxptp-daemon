@@ -294,9 +294,10 @@ func (d *SyncEData) String() string {
 
 // StateData is a lock/holdover transition. ClockID set on T-BC transitions.
 type StateData struct {
-	State      PTPState
-	SourceLost bool
-	ClockID    string
+	State             PTPState
+	SourceLost        bool
+	ClockID           string
+	BMCASelectedLocal bool // The leading ptp4l instance selected its local clock.
 }
 
 func (*StateData) eventData() {}
