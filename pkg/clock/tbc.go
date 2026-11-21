@@ -467,7 +467,7 @@ func (c *TBC) updateDownstreamData(cfgName string) {
 // Implements Rec. ITU-T G.8275 (2024) Amd. 1 (08/2024)
 // Table VIII.3 − T-BC-/ T-BC-P/ T-BC-A Announce message contents
 // for free-run (acquiring), holdover within / out of the specification
-func (c *TBC) announceLocalData(cfgName string) {
+func (c *TBC) announceLocalData(_ string) {
 	clockID := c.leadingClockData.clockID
 	controlledPortsConfig := c.controlledPortsConfig
 	downstreamTimeProperties := c.leadingClockData.downstreamTimeProperties
@@ -523,11 +523,6 @@ func (c *TBC) announceLocalData(cfgName string) {
 	}
 	go func() {
 		if err := c.pmcClient.SetGMSettings(controlledPortsConfig, gs); err != nil {
-			glog.Errorf("Failed to set GM settings: %v", err)
-		}
-	}()
-	go func() {
-		if err := c.pmcClient.SetGMSettings(cfgName, gs); err != nil {
 			glog.Errorf("Failed to set GM settings: %v", err)
 		}
 	}()
