@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/client-go/kubernetes/fake"
 
 	ptpv2alpha1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v2alpha1"
 )
@@ -45,6 +46,50 @@ func TestVendorDelayCompensationUsesPackageLabels(t *testing.T) {
 			assert.Equal(t, tc.esync, labels["DPLL ESync out"])
 		})
 	}
+}
+
+func TestHPEEL140SMA4OutputPhaseAdjustments(t *testing.T) {
+	hwDefaults, err := LoadHardwareDefaults(HwDefHPEEL140Gen12, nil)
+	if !assert.NoError(t, err) || !assert.NotNil(t, hwDefaults) {
+		return
+	}
+
+	// The network interface is only used by FSRead getters, which are not
+	// part of this model, so any non-empty value works.
+	adjustments, err := ResolvePhaseAdjustments(hwDefaults, "eno1np0")
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	// SMA4 1PPS output pair corrections are part of the vendor delay model.
+	assert.Equal(t, int64(-10000), adjustments["OUT0P"],
+		"OUT0P adjustment should match the SMA4 1PPS route delay")
+	assert.Equal(t, int64(-10000), adjustments["OUT0N"],
+		"OUT0N adjustment should match the SMA4 1PPS route delay")
+
+	// Existing NAC and eSync routes remain intact.
+	assert.Equal(t, int64(-9250), adjustments["REF0P"])
+	assert.Equal(t, int64(-9250), adjustments[testPackageLabelREF0N])
+	assert.Equal(t, int64(-5000), adjustments["OUT8N"])
+	assert.Equal(t, int64(-5000), adjustments["OUT8P"])
+	assert.Equal(t, int64(-22500), adjustments["OUT2P"])
+}
+
+func TestHPEEL140SMA4PinsInjectedAsPhaseOutputs(t *testing.T) {
+	hcm := NewHardwareConfigManager(fake.NewClientset(), "default", nil)
+
+	subsystem := &ptpv2alpha1.Subsystem{
+		Name:                        "leader",
+		HardwareSpecificDefinitions: HwDefHPEEL140Gen12,
+	}
+	if !assert.NoError(t, hcm.injectDelayCompensationPins(subsystem)) {
+		return
+	}
+
+	_, hasP := subsystem.DPLL.PhaseOutputs["OUT0P"]
+	_, hasN := subsystem.DPLL.PhaseOutputs["OUT0N"]
+	assert.True(t, hasP, "OUT0P should be injected into PhaseOutputs")
+	assert.True(t, hasN, "OUT0N should be injected into PhaseOutputs")
 }
 
 func TestResolvePhaseAdjustments(t *testing.T) {

@@ -4,6 +4,8 @@
 # NOTE: Delay values (delayPs) are specified with the correct sign for the target DPLL hardware.
 # Different DPLL implementations may treat phase adjustment direction differently.
 # The system sums these values directly without negation and passes them to the DPLL.
+# 
+# NOTE: The compensation numbers in this section relate to server configuration with 2 OCP CF cards
 
 # 1. Inventory - static phase transfer nodes
 components:
@@ -41,9 +43,26 @@ components:
     description: "DPLL ESync output pin to CF, OUT2P"
     compensationPoint:
       name: "OUT2P"
-      type: dpll
+      type: dpll  
 
   - id: "CF ESync in"
+
+# DPLL to SMA4 - 1PPS output pair
+# OUT0P is the SMA4_1PPS_OUT pin; OUT0N is the complementary pin of the pair.
+# The -10000ps values are the total output corrections for the pair (sign per
+# DPLL convention; the system sums them directly without negation).
+  - id: "DPLL phase out SMA4 1PPS P"
+    description: "DPLL phase signal output to SMA4 1PPS connector, OUT0P"
+    compensationPoint:
+      name: "OUT0P"
+      type: dpll
+  - id: "DPLL phase out SMA4 1PPS N"
+    description: "DPLL phase signal output to SMA4 1PPS connector, OUT0N"
+    compensationPoint:
+      name: "OUT0N"
+      type: dpll
+
+  - id: "SMA4 1PPS out connector"
 
 
 # 2. Topology: Physical connections (graph edges)
@@ -52,24 +71,33 @@ connections:
   # NAC to Timing Module routing/wiring
   - from: "NAC0 phase out 1kHz"
     to: "DPLL phase in 1kHz"
-    delayPs: -2600
+    delayPs: -9250
   - from: "NAC0 phase out 1Hz"
     to: "DPLL phase in 1Hz"
-    delayPs: -2600
+    delayPs: -9250
 
 
   # DPLL to NAC (during holdover)
   - from: "DPLL phase out 1kHz"
     to: "NAC0 phase in 1kHz"
-    delayPs: -7500
+    delayPs: -5000
   - from: "DPLL phase out 1Hz"
     to: "NAC0 phase in 1Hz"
-    delayPs: -7500
+    delayPs: -5000
 
 
   - from: "DPLL ESync out"
     to: "CF ESync in"
-    delayPs: -25000
+    delayPs: -22500
+
+
+  # DPLL to SMA4 1PPS output pair (phase correction)
+  - from: "DPLL phase out SMA4 1PPS P"
+    to: "SMA4 1PPS out connector"
+    delayPs: -10000
+  - from: "DPLL phase out SMA4 1PPS N"
+    to: "SMA4 1PPS out connector"
+    delayPs: -10000
 
 
 # 3. Logic: Where do we compensate for the delay
@@ -93,3 +121,10 @@ routes:
   - name: "DPLL ESync out to CF ESync in"
     sequence: ["DPLL ESync out", "CF ESync in"]
     compensator: "DPLL ESync out"
+
+  - name: "DPLL phase out SMA4 1PPS P to connector"
+    sequence: ["DPLL phase out SMA4 1PPS P", "SMA4 1PPS out connector"]
+    compensator: "DPLL phase out SMA4 1PPS P"
+  - name: "DPLL phase out SMA4 1PPS N to connector"
+    sequence: ["DPLL phase out SMA4 1PPS N", "SMA4 1PPS out connector"]
+    compensator: "DPLL phase out SMA4 1PPS N"
