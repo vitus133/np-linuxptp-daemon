@@ -356,34 +356,26 @@ func configureTBCSource(t *testing.T, manager *clockmgr.ClockManager, events cha
 	generation, err := manager.ConfigureSourceQualification(cfg, []string{iface}, utils.QualificationConfig{
 		QualifiedThreshold: 100, DisqualifiedThreshold: 100, QualifiedSamples: 5, DisqualifiedSamples: 5})
 	require.NoError(t, err)
-	observe := func(observation event.PTPSourceObservation) event.SourceQualification {
+	observe := func(observation event.PTPSourceObservation) {
 		t.Helper()
 		observation.Generation = generation
-		observation.Reply = make(chan event.SourceQualification, 1)
 		events <- event.Event{Source: event.PTP4l, CfgName: cfg, IFace: iface, ClockType: event.TBC,
 			Time: time.Now().UnixMilli(), Data: &observation}
-		select {
-		case result := <-observation.Reply:
-			return result
-		case <-time.After(time.Second):
-			t.Fatal("source observation was not processed")
-			return event.SourceQualification{}
-		}
 	}
 	return func(ready bool) {
 		t.Helper()
 		if !ready {
 			observe(event.PTPSourceObservation{Selection: parserconstants.BMCALocal})
-			return
+		} else {
+			observe(event.PTPSourceObservation{Selection: parserconstants.BMCAExternal, ClockID: testClockID})
+			for i := 0; i < 5; i++ {
+				observe(event.PTPSourceObservation{ServoState: "s2", Offset: 10})
+			}
 		}
-		observe(event.PTPSourceObservation{Selection: parserconstants.BMCAExternal, ClockID: testClockID})
-		var result event.SourceQualification
-		for i := 0; i < 5; i++ {
-			result = observe(event.PTPSourceObservation{ServoState: "s2", Offset: 10})
-		}
-		require.True(t, result.Ready)
-		events <- event.Event{Source: event.PTP4l, CfgName: cfg, ClockType: event.TBC, Time: time.Now().UnixMilli(),
-			Data: &event.PTPSourceApplied{Generation: generation, Revision: result.Revision, Enabled: true}}
+		require.Eventually(t, func() bool {
+			result, exists := manager.SourceQualification(cfg)
+			return exists && result.Ready == ready
+		}, time.Second, time.Millisecond, "source observations were not processed")
 	}
 }
 

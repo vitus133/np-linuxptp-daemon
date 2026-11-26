@@ -24,15 +24,17 @@ import (
 )
 
 const (
-	configLabel  = "config"
-	fromLabel    = "from"
-	ifaceLabel   = "iface"
-	nodeLabel    = "node"
-	processLabel = "process"
+	configLabel                  = "config"
+	fromLabel                    = "from"
+	ifaceLabel                   = "iface"
+	nodeLabel                    = "node"
+	processLabel                 = "process"
+	maxPendingSourceObservations = 100
 )
 
 // ClockManager ... event handler to process events
 type ClockManager struct {
+	clockLifecycleMu  sync.Mutex // replacement waits for input I/O without holding clockManagementMu
 	clockManagementMu sync.Mutex
 	nodeName          string
 	events            chan event.Event
@@ -71,9 +73,23 @@ func (m *ClockManager) ConfigureSourceQualification(cfg string, ports []string, 
 		return 0, fmt.Errorf("source qualification requires a T-BC clock for %s", cfg)
 	}
 	generation, err := clk.ConfigureSourceQualification(ports, policy)
-	m.rejectObsoleteSourceObservationsLocked()
 	m.publishStats()
 	return generation, err
+}
+
+// SetSourceInputAction connects the current source to its hardware action.
+func (m *ClockManager) SetSourceInputAction(cfg string, generation uint64, profile string, apply func(bool) error) (*clock.SourceInputActions, error) {
+	m.clockManagementMu.Lock()
+	defer m.clockManagementMu.Unlock()
+	clk, ok := m.clocks[cfg].(*clock.TBC)
+	if !ok {
+		return nil, fmt.Errorf("source qualification requires a T-BC clock for %s", cfg)
+	}
+	source, exists := clk.SourceQualification(cfg)
+	if !exists || source.Generation != generation {
+		return nil, fmt.Errorf("source qualification changed for %s", cfg)
+	}
+	return clk.SetSourceInputAction(profile, apply)
 }
 
 // SourceQualification snapshots the upstream identity/epoch for a new process
@@ -211,8 +227,21 @@ func (m *ClockManager) ConfigureOSClockFilter(cfg clock.OSClockFilterConfig) {
 // AddClock takes ownership of a given Clock
 // pmcClient may be nil for clock types that do not use PMC (e.g. BC, OC).
 func (m *ClockManager) AddClock(clk clock.Clock) error {
+	m.clockLifecycleMu.Lock()
+	defer m.clockLifecycleMu.Unlock()
 	clk.SetIPC(m.sendIPC)
 	clk.SetEventLoopbackFunc(m.sendEvent)
+	m.clockManagementMu.Lock()
+	var oldInputs []*clock.TBC
+	for _, cfg := range clk.ConfigNames() {
+		if prev, ok := m.clocks[cfg].(*clock.TBC); ok && prev != clk {
+			oldInputs = append(oldInputs, prev)
+		}
+	}
+	m.clockManagementMu.Unlock()
+	for _, prev := range oldInputs {
+		prev.CloseSourceInputActions()
+	}
 	m.clockManagementMu.Lock()
 	defer m.clockManagementMu.Unlock()
 	clk.SetOsClock(&m.osClock)
@@ -228,7 +257,6 @@ func (m *ClockManager) AddClock(clk clock.Clock) error {
 		}
 		m.clocks[cfg] = clk
 	}
-	m.rejectObsoleteSourceObservationsLocked()
 	glog.Infof("AddClock: registered %s clock for config %s", clk.ClockType(), clk.ConfigName())
 	m.publishStats()
 	return nil
@@ -285,6 +313,19 @@ func (m *ClockManager) snapshotStats(requests []process.StatsRequest) process.Ev
 
 // RemoveAllClocks tears down all registered clocks and cleans up associated state.
 func (m *ClockManager) RemoveAllClocks() {
+	m.clockLifecycleMu.Lock()
+	defer m.clockLifecycleMu.Unlock()
+	m.clockManagementMu.Lock()
+	var oldInputs []*clock.TBC
+	for _, clk := range m.clocks {
+		if tbc, ok := clk.(*clock.TBC); ok {
+			oldInputs = append(oldInputs, tbc)
+		}
+	}
+	m.clockManagementMu.Unlock()
+	for _, tbc := range oldInputs {
+		tbc.CloseSourceInputActions()
+	}
 	m.clockManagementMu.Lock()
 	m.osClock.Reset()
 
@@ -296,7 +337,7 @@ func (m *ClockManager) RemoveAllClocks() {
 	}
 	m.clocks = map[string]clock.Clock{}
 	m.osClockConfigs = make(map[string]struct{})
-	m.rejectObsoleteSourceObservationsLocked()
+	m.pendingSourceObservations = nil
 	m.publishStats()
 	m.clockManagementMu.Unlock()
 
@@ -445,6 +486,13 @@ func (m *ClockManager) ProcessEvent(ev event.Event) {
 	if clk.ClockType() == event.TBC && m.IsApplying() {
 		return
 	}
+	if tbc, ok := clk.(*clock.TBC); ok && ev.Source == event.PTP4l {
+		if _, isOffset := ev.Data.(*event.OffsetData); isOffset {
+			if source, exists := tbc.SourceQualification(ev.CfgName); exists && source.IFace != "" {
+				ev.IFace = source.IFace
+			}
+		}
+	}
 
 	if ev.WriteToLog {
 		if logData := ev.GetLogData(); logData != "" {
@@ -460,43 +508,48 @@ func (m *ClockManager) ProcessEvent(ev event.Event) {
 // processSourceObservationLocked is shared by ordinary delivery and apply-end
 // replay. It never waits for the scanner or performs input hardware actions.
 func (m *ClockManager) processSourceObservationLocked(ev event.Event, observation *event.PTPSourceObservation) {
-	result := event.SourceQualification{}
 	if clk := m.findCurrentTBCForSourceObservation(ev, observation); clk != nil {
 		if m.IsApplying() {
-			if !observation.SourceLost && (observation.Selection == parserconstants.BMCALocal || observation.Selection == parserconstants.BMCAExternal) {
-				// The scanner waits for this original reply (or shutdown). Replying
-				// with a rejection now would leave no receiver for replay's verdict.
-				m.pendingSourceObservations = append(m.pendingSourceObservations, ev)
-				m.publishStats()
-				return
-			}
-			if !observation.SourceLost && observation.Selection == parserconstants.BMCAUnknown && observation.PortRole != nil && *observation.PortRole == parserconstants.PortRoleSlave {
-				// The scanner continues immediately; retain a copy without a second reply.
+			selectedPort := !observation.SourceLost && observation.Selection == parserconstants.BMCAUnknown && observation.PortRole != nil && *observation.PortRole == parserconstants.PortRoleSlave
+			if observation.SourceLost || observation.Selection == parserconstants.BMCALocal || observation.Selection == parserconstants.BMCAExternal || selectedPort {
 				retained := *observation
-				retained.PortRole = utils.ToPtr(*observation.PortRole)
-				retained.Reply = nil
+				if retained.PortRole != nil {
+					retained.PortRole = utils.ToPtr(*retained.PortRole)
+				}
 				ev.Data = &retained
-				// Only the latest role for a port is needed between BMCA decisions.
-				for i := len(m.pendingSourceObservations) - 1; i >= 0; i-- {
-					pending := m.pendingSourceObservations[i]
-					previous := pending.Data.(*event.PTPSourceObservation)
-					if pending.CfgName != ev.CfgName || previous.Generation != observation.Generation {
-						continue
-					}
-					if previous.Selection != parserconstants.BMCAUnknown {
-						break
-					}
-					if pending.IFace == ev.IFace {
-						m.pendingSourceObservations = slices.Delete(m.pendingSourceObservations, i, i+1)
-						break
+				if selectedPort {
+					// Only the latest role for a port is needed between source transitions.
+					for i := len(m.pendingSourceObservations) - 1; i >= 0; i-- {
+						pending := m.pendingSourceObservations[i]
+						previous := pending.Data.(*event.PTPSourceObservation)
+						if pending.CfgName != ev.CfgName || previous.Generation != observation.Generation {
+							continue
+						}
+						if previous.SourceLost || previous.Selection != parserconstants.BMCAUnknown {
+							break
+						}
+						if pending.IFace == ev.IFace {
+							m.pendingSourceObservations = slices.Delete(m.pendingSourceObservations, i, i+1)
+							break
+						}
 					}
 				}
-				m.pendingSourceObservations = append(m.pendingSourceObservations, ev)
+				count := 0
+				for _, pending := range m.pendingSourceObservations {
+					if pending.CfgName == ev.CfgName {
+						count++
+					}
+				}
+				if count >= maxPendingSourceObservations {
+					glog.Errorf("SOURCE OBSERVATION QUEUE FULL for %s during profile apply: DROPPING event %s", ev.CfgName, observation)
+				} else {
+					m.pendingSourceObservations = append(m.pendingSourceObservations, ev)
+				}
 			}
 		} else {
 			previousSource, _ := clk.SourceQualification(ev.CfgName)
 			previous := clk.GetState()
-			result = clk.ObserveSource(ev, observation)
+			result := clk.ObserveSource(ev, observation)
 			source, _ := clk.SourceQualification(ev.CfgName)
 			portChanged := previousSource.IFace != source.IFace
 			if portChanged {
@@ -514,7 +567,6 @@ func (m *ClockManager) processSourceObservationLocked(ev event.Event, observatio
 		}
 	}
 	m.publishStats()
-	replySourceQualification(observation, result)
 }
 
 // findCurrentTBCForSourceObservation returns the T-BC clock for an observation
@@ -529,28 +581,6 @@ func (m *ClockManager) findCurrentTBCForSourceObservation(ev event.Event, observ
 		return nil
 	}
 	return clk
-}
-
-// rejectObsoleteSourceObservationsLocked releases invalidated publishers without
-// waiting for apply to finish. Aggregate-only resets preserve the PTP generation.
-func (m *ClockManager) rejectObsoleteSourceObservationsLocked() {
-	m.pendingSourceObservations = slices.DeleteFunc(m.pendingSourceObservations, func(ev event.Event) bool {
-		observation := ev.Data.(*event.PTPSourceObservation)
-		if m.findCurrentTBCForSourceObservation(ev, observation) != nil {
-			return false
-		}
-		replySourceQualification(observation, event.SourceQualification{})
-		return true
-	})
-}
-
-func replySourceQualification(observation *event.PTPSourceObservation, result event.SourceQualification) {
-	// Rejections also get a reply; removed/replaced clocks must not strand an
-	// old scanner. Replies are buffered: never wait for hardware or a receiver.
-	select {
-	case observation.Reply <- result:
-	default:
-	}
 }
 
 // recordClockState publishes the evaluated clock verdict for both ordinary
@@ -612,7 +642,6 @@ func (m *ClockManager) reset(ev event.Event) {
 		}
 		m.deleteClockOffsetMetrics(clk.ConfigName(), string(clk.ClockType()))
 	}
-	m.rejectObsoleteSourceObservationsLocked()
 	m.osClock.E3State = event.PTP_NOTSET
 	if ev.Source == event.TS2PHC {
 		m.unregisterMetrics(ev.CfgName, "")

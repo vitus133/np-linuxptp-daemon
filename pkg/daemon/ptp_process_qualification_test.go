@@ -110,6 +110,7 @@ func TestSourceQualificationFreshSamplesAndHardware(t *testing.T) {
 			}
 			cm := attachQualificationClock(t, p, utils.QualificationConfig{UseS3: useS3, QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 2, DisqualifiedSamples: 1})
 			qualified := func() bool {
+				bmcaSnapshot(t, p, cm)
 				result, exists := cm.SourceQualification(p.configName)
 				return exists && result.Qualified
 			}
@@ -164,9 +165,12 @@ func TestSourceQualificationHardwareFailure(t *testing.T) {
 	t.Parallel()
 	failEnable := true
 	var actions []bool
+	var actionMu sync.Mutex
 	p := &ptpProcess{ExecProcess: ExecProcess{name: event.Ptp4lProcessName, configName: "ptp4l.0.config", eventCh: make(chan event.Event, 10)}, nodeProfile: &ptpv1.PtpProfile{},
-		tBCAttributes: tBCProcessAttributes{activePort: "tr0", trIfaceNames: []string{"tr0"}},
+		tBCAttributes: tBCProcessAttributes{trIfaceNames: []string{"tr0"}},
 		sourceQualification: &sourceQualificationRuntime{apply: func(ready bool) error {
+			actionMu.Lock()
+			defer actionMu.Unlock()
 			actions = append(actions, ready)
 			if ready && failEnable {
 				return errors.New("pin update failed")
@@ -178,33 +182,29 @@ func TestSourceQualificationHardwareFailure(t *testing.T) {
 	p.forwardSourceData(nil, &parser.PTPEvent{Iface: "tr0", Role: parserconstants.PortRoleSlave})
 	p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
 	p.forwardSourceData(&parser.Metrics{Iface: "tr0", Offset: 10, ServoState: "s2"}, nil)
-	q := p.sourceQualification
-	q.mu.Lock()
-	appliedKnown := q.appliedKnown
+	bmcaSnapshot(t, p, cm)
+	actionMu.Lock()
 	attempts := append([]bool(nil), actions...)
-	q.mu.Unlock()
-	require.False(t, appliedKnown)
+	actionMu.Unlock()
 	require.Equal(t, []bool{false, true}, attempts)
 	result, exists := cm.SourceQualification(p.configName)
 	require.True(t, exists && result.Qualified, "hardware failure must not hide source facts")
-	q.mu.Lock()
+	actionMu.Lock()
 	failEnable = false
-	q.mu.Unlock()
+	actionMu.Unlock()
 	p.forwardSourceData(&parser.Metrics{Iface: "tr0", Offset: 10, ServoState: "s2"}, nil)
-	q.mu.Lock()
-	appliedKnown = q.appliedKnown
+	bmcaSnapshot(t, p, cm)
+	actionMu.Lock()
 	attempts = append([]bool(nil), actions...)
-	q.mu.Unlock()
-	require.False(t, appliedKnown, "a fresh sample must not retry a failed action")
+	actionMu.Unlock()
 	require.Equal(t, []bool{false, true}, attempts)
 	p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCALocal})
 	p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
 	p.forwardSourceData(&parser.Metrics{Iface: "tr0", Offset: 10, ServoState: "s2"}, nil)
-	q.mu.Lock()
-	appliedKnown, applied := q.appliedKnown, q.applied
+	bmcaSnapshot(t, p, cm)
+	actionMu.Lock()
 	attempts = append([]bool(nil), actions...)
-	q.mu.Unlock()
-	require.True(t, appliedKnown && applied, "a new readiness transition must apply the input")
+	actionMu.Unlock()
 	require.Equal(t, []bool{false, true, false, true}, attempts)
 }
 
@@ -422,20 +422,10 @@ func TestSourceQualificationParsedPipeline(t *testing.T) {
 	policy, err := resolveSourceQualificationPolicy(profile)
 	require.NoError(t, err)
 	require.NoError(t, p.configureSourceQualification(policy))
-	p.sourceQualification.ctx = startQualificationClock(t, cm)
-	updates := cm.StatsUpdatesCh()
-	qualified := false
+	p.sourceQualification.ctx = startQualificationClock(t, cm, events)
+	t.Cleanup(p.sourceQualification.close)
 	readiness := func() bool {
-		// Consume pushed snapshots like ProcessManager. An unrelated log does
-		// not publish a sample, so retain the latest evaluated readiness.
-		for {
-			select {
-			case stats := <-updates:
-				qualified = stats.SourceQualified[p.configName]
-			default:
-				return qualified
-			}
-		}
+		return bmcaSnapshot(t, p, cm).SourceQualified[p.configName]
 	}
 	p.processOutput("ptp4l[4268779.809]: [ptp4l.0.config] port 1: UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED")
 	p.processOutput("ptp4l[4268779.810]: [ptp4l.0.config] selected best master clock arbitrary-id")
@@ -466,17 +456,56 @@ func attachQualificationClock(t *testing.T, p *ptpProcess, policy utils.Qualific
 	generation, err := cm.ConfigureSourceQualification(p.configName, p.tBCAttributes.trIfaceNames, policy)
 	require.NoError(t, err)
 	p.sourceQualification.generation = generation
-	p.sourceQualification.ctx = startQualificationClock(t, cm)
+	q := p.sourceQualification
+	q.actions, err = cm.SetSourceInputAction(p.configName, generation, getProfileName(p.nodeProfile), func(ready bool) error {
+		q.mu.Lock()
+		apply, ctx, closed := q.apply, q.ctx, q.closed
+		q.mu.Unlock()
+		if apply == nil || (ready && (closed || (ctx != nil && ctx.Err() != nil))) {
+			return nil
+		}
+		return apply(ready)
+	})
+	require.NoError(t, err)
+	p.sourceQualification.ctx = startQualificationClock(t, cm, p.eventCh)
 	t.Cleanup(p.sourceQualification.close)
 	return cm
 }
 
-func startQualificationClock(t *testing.T, cm *clockmgr.ClockManager) context.Context {
+var qualificationTestBarriers sync.Map
+
+func qualificationTestBarrier(events chan event.Event) chan struct{} {
+	barrier, _ := qualificationTestBarriers.LoadOrStore(events, make(chan struct{}, 1))
+	return barrier.(chan struct{})
+}
+
+func startQualificationClock(t *testing.T, cm *clockmgr.ClockManager, events chan event.Event) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); cm.ProcessEvents(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
+	barrier := qualificationTestBarrier(events)
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				cm.ProcessEvent(ev)
+				if ev.Source == event.MONITORING {
+					select {
+					case barrier <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-done; qualificationTestBarriers.Delete(events) })
 	return ctx
 }
 
@@ -501,6 +530,8 @@ func TestSourceQualificationHardwareDoesNotBlockEventPipeline(t *testing.T) {
 			}
 			return nil
 		}}}
+	p.sourceQualification.actions, err = cm.SetSourceInputAction(p.configName, generation, "test", p.sourceQualification.apply)
+	require.NoError(t, err)
 	pm := &ProcessManager{eventsIn: in, eventsOut: out, clockMgr: cm, statsIn: cm.StatsUpdatesCh()}
 	pmDone, cmDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(pmDone); pm.processEvents(ctx) }()
@@ -517,17 +548,13 @@ func TestSourceQualificationHardwareDoesNotBlockEventPipeline(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("hardware action did not start")
 	}
-	// The scanner is held in hardware I/O. Other events and clock snapshots
-	// must still flow through both managers while input actions are serialized.
-	reply := make(chan event.SourceQualification, 1)
+	// Other observations and clock snapshots flow while input actions are blocked.
 	in <- event.Event{Source: event.PTP4l, CfgName: p.configName, IFace: "tr0", Data: &event.PTPSourceObservation{
-		Generation: generation, ServoState: "s2", Offset: 9, Reply: reply}}
-	select {
-	case result := <-reply:
-		require.True(t, result.Qualified, "both managers must process observations while hardware I/O is blocked")
-	case <-time.After(time.Second):
-		t.Fatal("hardware action blocked the event pipeline")
-	}
+		Generation: generation, ServoState: "s2", Offset: 250}}
+	require.Eventually(t, func() bool {
+		result, exists := cm.SourceQualification(p.configName)
+		return exists && !result.Ready
+	}, time.Second, time.Millisecond, "hardware action blocked the event pipeline")
 	closed := make(chan struct{})
 	go func() { p.sourceQualification.close(); close(closed) }()
 	finish()
@@ -538,22 +565,21 @@ func TestSourceQualificationHardwareDoesNotBlockEventPipeline(t *testing.T) {
 	}
 }
 
-func TestSourceQualificationShutdownCancelsReplyWait(t *testing.T) {
+func TestSourceQualificationShutdownSkipsObservations(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	cancel()
 	p := &ptpProcess{ExecProcess: ExecProcess{eventCh: make(chan event.Event, 1)}, sourceQualification: &sourceQualificationRuntime{ctx: ctx}}
 	done := make(chan struct{})
 	go func() { p.observeSource("", &event.PTPSourceObservation{SourceLost: true}); close(done) }()
-	require.Eventually(t, func() bool { return len(p.eventCh) == 1 }, time.Second, time.Millisecond)
-	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("scanner remained blocked after its consumer stopped")
+		t.Fatal("scanner remained blocked after shutdown")
 	}
+	require.Empty(t, p.eventCh)
 }
 
-func TestSourceQualificationDropsWhenEventChannelFull(t *testing.T) {
+func TestSourceQualificationOverflowDoesNotBlock(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		capacity int
@@ -568,7 +594,7 @@ func TestSourceQualificationDropsWhenEventChannelFull(t *testing.T) {
 			}
 			done := make(chan struct{})
 			go func() { p.observeSource("tr0", &event.PTPSourceObservation{ServoState: "s2", Offset: 10}); close(done) }()
-			t.Cleanup(func() { cancel(); <-done })
+			t.Cleanup(func() { cancel(); p.sourceQualification.close(); <-done })
 			select {
 			case <-done:
 			case <-time.After(time.Second):
@@ -580,7 +606,7 @@ func TestSourceQualificationDropsWhenEventChannelFull(t *testing.T) {
 	}
 }
 
-func TestSourceQualificationTransitionsWaitForDeliveryOrShutdown(t *testing.T) {
+func TestSourceQualificationTransitionsDropOnOverflow(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		observation event.PTPSourceObservation
@@ -609,27 +635,21 @@ func TestSourceQualificationTransitionsWaitForDeliveryOrShutdown(t *testing.T) {
 					}
 					close(done)
 				}()
-				t.Cleanup(func() { cancel(); <-done })
+				t.Cleanup(func() { cancel(); p.sourceQualification.close(); <-done })
 				select {
 				case <-done:
-					t.Fatal("critical transition was dropped while the event channel was full")
-				case <-time.After(20 * time.Millisecond):
+				case <-time.After(time.Second):
+					t.Fatal("critical transition blocked the scanner")
 				}
 				if outcome == "shutdown" {
 					cancel()
 				} else {
 					require.Equal(t, "pending", (<-p.eventCh).CfgName)
-					select {
-					case ev := <-p.eventCh:
-						data := ev.Data.(*event.PTPSourceObservation)
-						require.Equal(t, observation.PortRole, data.PortRole)
-						require.Equal(t, observation.Selection, data.Selection)
-						require.Equal(t, observation.SourceLost, data.SourceLost)
-						require.Equal(t, uint64(7), data.Generation)
-						data.Reply <- event.SourceQualification{SourceType: event.PTP4l, IFace: "tr0", Generation: data.Generation}
-					case <-time.After(time.Second):
-						t.Fatal("critical transition was not delivered after capacity became available")
-					}
+					require.Empty(t, p.eventCh, "the overflowed transition must not be retried")
+					p.observeSource("tr0", &event.PTPSourceObservation{ServoState: "s2", Offset: 10})
+					data := (<-p.eventCh).Data.(*event.PTPSourceObservation)
+					require.Equal(t, uint64(7), data.Generation)
+					require.Equal(t, "s2", data.ServoState, "later events must still be delivered")
 				}
 				select {
 				case <-done:
@@ -638,11 +658,8 @@ func TestSourceQualificationTransitionsWaitForDeliveryOrShutdown(t *testing.T) {
 				}
 				if outcome == "shutdown" {
 					require.Len(t, p.eventCh, 1)
-					require.Empty(t, applied)
-				} else {
-					require.Len(t, applied, 1)
-					require.False(t, <-applied)
 				}
+				require.Empty(t, applied)
 			})
 		}
 	}

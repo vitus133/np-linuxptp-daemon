@@ -132,13 +132,14 @@ func newStubProcess(p process.Process) *stubProcess {
 func stringPtr(s string) *string { return utils.ToPtr(s) }
 
 type ConditionsTester struct {
-	dn     *Daemon
-	pm     *ProcessManager
-	cm     *clockmgr.ClockManager
-	clks   map[string]*clock.Clock
-	ctx    context.Context
-	cancel context.CancelFunc
-	t      *testing.T
+	dn           *Daemon
+	pm           *ProcessManager
+	cm           *clockmgr.ClockManager
+	clks         map[string]*clock.Clock
+	ctx          context.Context
+	cancel       context.CancelFunc
+	t            *testing.T
+	clockBarrier chan struct{}
 }
 
 func NewCondiitonsTester(t *testing.T, clockType event.ClockType, cfgNames ...string) *ConditionsTester {
@@ -161,7 +162,8 @@ func NewCondiitonsTester(t *testing.T, clockType event.ClockType, cfgNames ...st
 			eventsIn:  inbound,
 			eventsOut: handler,
 		},
-		clks: make(map[string]*clock.Clock),
+		clks:         make(map[string]*clock.Clock),
+		clockBarrier: make(chan struct{}, 1),
 	}
 
 	cm := clockmgr.Init("test-node", handler, nil, nil, nil, nil)
@@ -235,7 +237,26 @@ func (c *ConditionsTester) StartPM() {
 }
 
 func (c *ConditionsTester) StartCM() {
-	go c.cm.ProcessEvents(c.ctx)
+	go func() {
+		for {
+			select {
+			case ev, ok := <-c.pm.eventsOut:
+				if !ok {
+					return
+				}
+				c.cm.ProcessEvent(ev)
+				if ev.Source == event.MONITORING && ev.CfgName == "source-test-barrier" {
+					select {
+					case c.clockBarrier <- struct{}{}:
+					case <-c.ctx.Done():
+						return
+					}
+				}
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 func (c *ConditionsTester) Start() {
@@ -299,23 +320,26 @@ func (c *ConditionsTester) SendSourceSamples(cfgName, port string, offset float6
 	observe := func(iface string, observation event.PTPSourceObservation) {
 		c.t.Helper()
 		observation.Generation = result.Generation
-		observation.Reply = make(chan event.SourceQualification, 1)
 		select {
 		case c.pm.eventsIn <- event.Event{Source: event.PTP4l, CfgName: cfgName, IFace: iface, Data: &observation}:
 		case <-time.After(time.Second):
 			c.t.Fatal("source observation was not delivered")
-		}
-		// Receipt alone is not evaluation: wait for the clock's verdict.
-		select {
-		case <-observation.Reply:
-		case <-time.After(time.Second):
-			c.t.Fatal("source observation was not evaluated by the clock")
 		}
 	}
 	observe(port, event.PTPSourceObservation{PortRole: utils.ToPtr(parserconstants.PortRoleSlave)})
 	observe("", event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
 	for i := 0; i < count; i++ {
 		observe(port, event.PTPSourceObservation{ServoState: "s2", Offset: offset})
+	}
+	select {
+	case c.pm.eventsIn <- event.Event{Source: event.MONITORING, CfgName: "source-test-barrier", Data: &event.PTPSourceObservation{}}:
+	case <-time.After(time.Second):
+		c.t.Fatal("source barrier was not delivered")
+	}
+	select {
+	case <-c.clockBarrier:
+	case <-time.After(time.Second):
+		c.t.Fatal("source observations were not evaluated by the clock")
 	}
 }
 
@@ -1140,7 +1164,7 @@ func TestTBC_Ts2phcUnlocksThroughProcessManager(t *testing.T) {
 
 	// Omitted source settings still require five fresh qualifying samples.
 	ct.SendSourceSamples(ptp4lConfig, testETH0, 10, 4)
-	// Source replies cover clock evaluation. The marker additionally waits for
+	// The source barrier covers clock evaluation. The marker additionally waits for
 	// the process manager to complete the startup decision for that snapshot.
 	ct.SendPluginEvent("test", reconcileEvent)
 	select {

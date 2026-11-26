@@ -24,6 +24,7 @@ import (
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/process"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/synce"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/testhelpers"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/utils"
 	ptpv1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v1"
 	ptpv2alpha1 "github.com/k8snetworkplumbingwg/ptp-operator/api/v2alpha1"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1145,26 +1146,26 @@ func TestTBCBMCAAppliesHardwareConditions(t *testing.T) {
 	})
 }
 
-func TestTBCDualUpstream_ActiveTRPort_Helper(t *testing.T) {
-	t.Run("returns active port when set", func(t *testing.T) {
-		attrs := &tBCProcessAttributes{
-			activePort:   "eno3",
-			trIfaceNames: []string{"eno2", "eno3"},
-		}
-		assert.Equal(t, "eno3", attrs.activeTRPort())
-	})
-
-	t.Run("falls back to first port when no active", func(t *testing.T) {
-		attrs := &tBCProcessAttributes{
-			trIfaceNames: []string{"eno2", "eno3"},
-		}
-		assert.Equal(t, "eno2", attrs.activeTRPort())
-	})
-
-	t.Run("returns empty when no ports", func(t *testing.T) {
-		attrs := &tBCProcessAttributes{}
-		assert.Equal(t, "", attrs.activeTRPort())
-	})
+func TestTBCOffsetBeforeSelectionUsesConfiguredPort(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ports []string
+		want  string
+	}{
+		{"configured", []string{"eno2", "eno3"}, "eno2"},
+		{"none", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &ptpProcess{
+				ExecProcess: ExecProcess{configName: "ptp4l.0.config", eventCh: make(chan event.Event, 1)},
+				tBCAttributes: tBCProcessAttributes{trPortsConfigFile: "ptp4l.0.config", trIfaceNames: tc.ports,
+					offsetEventWindow: utils.NewWindow(1)},
+			}
+			p.sendPtp4lOffsetEvent()
+			require.Len(t, p.eventCh, 1)
+			require.Equal(t, tc.want, (<-p.eventCh).IFace)
+		})
+	}
 }
 
 // TestPtp4lConf_PopulatePtp4lConf_ClockTypeWithCliArgs tests clock_type detection with cliArgs parameter

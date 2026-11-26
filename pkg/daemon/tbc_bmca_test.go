@@ -72,7 +72,7 @@ func newBMCATestProcess(t *testing.T, hcm *hardwareconfig.HardwareConfigManager)
 		mu.Unlock()
 		return apply(ready)
 	}
-	p.sourceQualification.ctx = startQualificationClock(t, cm)
+	p.sourceQualification.ctx = startQualificationClock(t, cm, events)
 	t.Cleanup(p.sourceQualification.close)
 	return p, cm, func() []bool { mu.Lock(); defer mu.Unlock(); return append([]bool(nil), actions...) }
 }
@@ -81,21 +81,41 @@ func bmcaLine(message string) string {
 	return fmt.Sprintf("ptp4l[1.123]: [%s:5] %s", bmcaTestConfig, message)
 }
 
-// A rejected no-op observation is a barrier behind queued action acknowledgements.
-// Read only the resulting detached snapshot, never live clock state off-loop.
+// Read a detached snapshot after the test clock loop has processed earlier events.
 func bmcaSnapshot(t *testing.T, p *ptpProcess, cm *clockmgr.ClockManager) process.EventStats {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	stats, err := waitForBMCASnapshot(ctx, p, cm)
 	require.NoError(t, err)
+	waitForSourceActions(t, p)
 	return stats
 }
 
+func waitForSourceActions(t *testing.T, p *ptpProcess) {
+	t.Helper()
+	if q := p.sourceQualification; q != nil {
+		q.mu.Lock()
+		actions := q.actions
+		q.mu.Unlock()
+		if actions != nil {
+			done := actions.Done()
+			if done == nil {
+				return
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("source input actions did not finish")
+			}
+		}
+	}
+}
+
 func waitForBMCASnapshot(ctx context.Context, p *ptpProcess, cm *clockmgr.ClockManager) (process.EventStats, error) {
-	reply := make(chan event.SourceQualification, 1)
-	barrier := event.Event{Source: event.PTP4l, CfgName: p.configName, ClockType: p.clockType,
-		Data: &event.PTPSourceObservation{Reply: reply}}
+	reply := qualificationTestBarrier(p.eventCh)
+	barrier := event.Event{Source: event.MONITORING, CfgName: p.configName, ClockType: p.clockType,
+		Data: &event.PTPSourceObservation{}}
 	select {
 	case p.eventCh <- barrier:
 	case <-ctx.Done():
@@ -131,8 +151,9 @@ func TestBMCASnapshotDeadline(t *testing.T) {
 					capacity = 1
 				}
 				events := make(chan event.Event, capacity)
+				t.Cleanup(func() { qualificationTestBarriers.Delete(events) })
 				if capacity != 0 {
-					events <- event.Event{CfgName: "earlier", Data: &event.PTPSourceApplied{Enabled: true}}
+					events <- event.Event{CfgName: "earlier", Data: &event.OffsetData{}}
 				}
 				cm := clockmgr.Init("test", events, nil, nil, nil, nil)
 				if tc.name == "snapshot" || tc.name == "shared deadline" {
@@ -154,15 +175,15 @@ func TestBMCASnapshotDeadline(t *testing.T) {
 					case err := <-done:
 						t.Fatalf("snapshot did not send a barrier: %v", err)
 					}
-					require.Equal(t, event.PTP4l, barrier.Source)
+					require.Equal(t, event.MONITORING, barrier.Source)
 					require.Equal(t, bmcaTestConfig, barrier.CfgName)
-					observation, ok := barrier.Data.(*event.PTPSourceObservation)
+					_, ok := barrier.Data.(*event.PTPSourceObservation)
 					require.True(t, ok)
 					if tc.name != "reply" {
 						if tc.name == "shared deadline" {
 							time.Sleep(400 * time.Millisecond)
 						}
-						observation.Reply <- event.SourceQualification{}
+						qualificationTestBarrier(events) <- struct{}{}
 					}
 				}
 				err := <-done
@@ -263,25 +284,10 @@ func TestTBCBMCASelectionDuringApply(t *testing.T) {
 	p, cm, actions := newBMCATestProcess(t, nil)
 	cm.SetApplying(true)
 	bmcaSnapshot(t, p, cm) // Drain the snapshot before the selection arrives.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		p.processOutput(bmcaLine("selected best master clock upstream-A"))
-	}()
-	t.Cleanup(func() { p.sourceQualification.close(); <-done })
-	select {
-	case stats := <-cm.StatsUpdatesCh():
-		require.False(t, stats.SourceQualified[bmcaTestConfig])
-	case <-time.After(time.Second):
-		t.Fatal("BMCA observation was not received during apply")
-	}
+	p.processOutput(bmcaLine("selected best master clock upstream-A"))
+	require.False(t, bmcaSnapshot(t, p, cm).SourceQualified[bmcaTestConfig])
 	require.Empty(t, actions(), "retaining a selection must not apply hardware during profile apply")
 	cm.SetApplying(false)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("apply completion did not release the BMCA observer")
-	}
 	p.processOutput(bmcaLine("port 1 (eno2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED"))
 	for i := 0; i < 5; i++ {
 		p.processOutput(bmcaLine("master offset 5 s2 freq 0 path delay 100"))
@@ -289,14 +295,14 @@ func TestTBCBMCASelectionDuringApply(t *testing.T) {
 	stats := bmcaSnapshot(t, p, cm)
 	require.True(t, stats.SourceQualified[bmcaTestConfig], "the initial selection must survive apply without another BMCA log line")
 	require.Equal(t, event.PTP_LOCKED, stats.ClockStates[bmcaTestConfig])
-	require.Equal(t, []bool{false, true}, actions(), "replayed evaluation must reach the normal input-action and acknowledgement path")
+	require.Equal(t, []bool{false, true}, actions(), "replayed evaluation must reach the normal input-action path")
 }
 
 func TestTBCBMCAPortSelectionDuringApply(t *testing.T) {
 	p, cm, actions := newBMCATestProcess(t, nil)
 	cm.SetApplying(true)
 	bmcaSnapshot(t, p, cm)
-	roleDone, continueBMCA := make(chan struct{}), make(chan struct{})
+	roleDone, continueBMCA, stop := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -304,15 +310,12 @@ func TestTBCBMCAPortSelectionDuringApply(t *testing.T) {
 		close(roleDone)
 		select {
 		case <-continueBMCA:
-		case <-p.sourceQualification.done:
+		case <-stop:
 			return
 		}
 		p.processOutput(bmcaLine("selected best master clock upstream-B"))
-		for i := 0; i < 5; i++ {
-			p.processOutput(bmcaLine("master offset 5 s2 freq 0 path delay 100"))
-		}
 	}()
-	t.Cleanup(func() { p.sourceQualification.close(); <-done })
+	t.Cleanup(func() { close(stop); p.sourceQualification.close(); <-done })
 	select {
 	case <-roleDone:
 	case <-time.After(time.Second):
@@ -321,20 +324,18 @@ func TestTBCBMCAPortSelectionDuringApply(t *testing.T) {
 	bmcaSnapshot(t, p, cm) // Drain the role's snapshot before sending BMCA.
 	close(continueBMCA)
 	select {
-	case stats := <-cm.StatsUpdatesCh():
-		require.False(t, stats.SourceQualified[bmcaTestConfig])
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("BMCA selection was not received during apply")
+		t.Fatal("BMCA selection blocked the scanner during apply")
 	}
+	require.False(t, bmcaSnapshot(t, p, cm).SourceQualified[bmcaTestConfig])
 	source, exists := cm.SourceQualification(bmcaTestConfig)
 	require.True(t, exists)
 	require.Empty(t, source.IFace, "port selection must not mutate the clock during apply")
 	require.Empty(t, actions(), "retained observations must not apply hardware during profile apply")
 	cm.SetApplying(false)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("apply completion did not release the BMCA observer")
+	for i := 0; i < 5; i++ {
+		p.processOutput(bmcaLine("master offset 5 s2 freq 0 path delay 100"))
 	}
 	stats := bmcaSnapshot(t, p, cm)
 	source, exists = cm.SourceQualification(bmcaTestConfig)
@@ -344,10 +345,17 @@ func TestTBCBMCAPortSelectionDuringApply(t *testing.T) {
 	p.eventCh = make(chan event.Event, 1)
 	p.sendPtp4lOffsetEvent()
 	require.Len(t, p.eventCh, 1)
-	require.Equal(t, "eno3", (<-p.eventCh).IFace, "offset events must use the selected port")
+	cm.ProcessEvent(<-p.eventCh)
+	var selected *event.DataDetails
+	for _, data := range cm.GetClock(bmcaTestConfig).ProcessData() {
+		if data.ProcessName == event.PTP4l {
+			selected = data.GetDataDetails("eno3")
+		}
+	}
+	require.NotNil(t, selected, "the clock must label offsets with its selected port")
 }
 
-func TestTBCBMCAPendingApplyObservationCanStop(t *testing.T) {
+func TestTBCBMCAObsoleteApplyObservationCannotAct(t *testing.T) {
 	for _, outcome := range []string{"cancel", "close"} {
 		t.Run(outcome, func(t *testing.T) {
 			p, cm, actions := newBMCATestProcess(t, nil)
@@ -356,26 +364,12 @@ func TestTBCBMCAPendingApplyObservationCanStop(t *testing.T) {
 			p.sourceQualification.ctx = ctx
 			cm.SetApplying(true)
 			bmcaSnapshot(t, p, cm)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
-			}()
-			t.Cleanup(func() { p.sourceQualification.close(); <-done })
-			select {
-			case <-cm.StatsUpdatesCh():
-			case <-time.After(time.Second):
-				t.Fatal("BMCA observation was not received during apply")
-			}
+			p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
+			bmcaSnapshot(t, p, cm)
 			if outcome == "cancel" {
 				cancel()
 			} else {
 				p.sourceQualification.close()
-			}
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("stopping the source did not cancel its deferred reply wait")
 			}
 			cm.RemoveAllClocks()
 			cm.SetApplying(false)
@@ -397,10 +391,13 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 				require.Equal(t, event.PTP_LOCKED, bmcaSnapshot(t, p, cm).ClockStates[bmcaTestConfig])
 				fail, enabled := true, true
 				var actions []bool
+				var actionMu sync.Mutex
 				q := p.sourceQualification
 				q.mu.Lock()
 				apply := q.apply
 				q.apply = func(ready bool) error {
+					actionMu.Lock()
+					defer actionMu.Unlock()
 					actions = append(actions, ready)
 					if ready == failingReady && fail {
 						if ready {
@@ -413,8 +410,8 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 				}
 				q.mu.Unlock()
 				observed := func() ([]bool, bool) {
-					q.mu.Lock()
-					defer q.mu.Unlock()
+					actionMu.Lock()
+					defer actionMu.Unlock()
 					return append([]bool(nil), actions...), enabled
 				}
 				line("selected local clock local-id as best master")
@@ -424,6 +421,7 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 					for i := 0; i < 5; i++ {
 						line("master offset 5 s2 freq 0 path delay 100")
 					}
+					bmcaSnapshot(t, p, cm)
 				}
 				want := []bool{false}
 				if failingReady {
@@ -431,9 +429,9 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 				}
 				got, _ := observed()
 				require.Equal(t, want, got, "the failing action must be attempted once")
-				q.mu.Lock()
+				actionMu.Lock()
 				fail = false
-				q.mu.Unlock()
+				actionMu.Unlock()
 				time.Sleep(1500 * time.Millisecond)
 				synctest.Wait()
 				got, _ = observed()
@@ -446,18 +444,23 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 					selection = parserconstants.BMCAExternal
 				}
 				p.observeSource("", &event.PTPSourceObservation{Selection: selection})
+				stats := bmcaSnapshot(t, p, cm)
 				got, _ = observed()
 				require.Equal(t, want, got, "unchanged observations must not repeat a failed action")
-				stats := bmcaSnapshot(t, p, cm)
 				require.Equal(t, failingReady, stats.SourceQualified[bmcaTestConfig])
-				require.Equal(t, event.PTP_HOLDOVER, stats.ClockStates[bmcaTestConfig])
+				wantClockState, wantSourceState := event.PTP_HOLDOVER, event.PTP_FREERUN
+				if failingReady {
+					wantClockState, wantSourceState = event.PTP_LOCKED, event.PTP_LOCKED
+				}
+				require.Equal(t, wantClockState, stats.ClockStates[bmcaTestConfig])
 				p.tBCAttributes.offsetEventWindow = utils.NewWindow(1)
 				p.sendPtp4lOffsetEvent()
-				require.Equal(t, event.PTP_FREERUN, bmcaSnapshot(t, p, cm).States[bmcaTestConfig][event.PTP4l], "failed input action must not report a locked offset")
+				require.Equal(t, wantSourceState, bmcaSnapshot(t, p, cm).States[bmcaTestConfig][event.PTP4l], "source state follows qualification, not hardware action results")
 				if failingReady {
 					_, enabledNow := observed()
 					require.True(t, enabledNow, "model a partially applied enable")
 					line("selected local clock local-id as best master")
+					bmcaSnapshot(t, p, cm)
 					got, enabledNow = observed()
 					require.Equal(t, []bool{false, true, false}, got, "loss must attempt to disable a partially enabled input")
 					require.False(t, enabledNow)
@@ -470,60 +473,6 @@ func TestTBCBMCAInputFailureDoesNotRetry(t *testing.T) {
 					recoveryActions, enabledNow := observed()
 					require.Equal(t, []bool{false, true}, recoveryActions, "recovery must attempt the new action")
 					require.True(t, enabledNow)
-				}
-			})
-		})
-	}
-}
-
-func TestTBCInputAcknowledgementWaitsForDeliveryOrShutdown(t *testing.T) {
-	for _, outcome := range []string{"delivery", "cancel", "close"} {
-		t.Run(outcome, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				actions := make(chan bool, 1)
-				p := &ptpProcess{ExecProcess: ExecProcess{eventCh: make(chan event.Event, 1)},
-					sourceQualification: &sourceQualificationRuntime{ctx: ctx, generation: 7, done: make(chan struct{}),
-						apply: func(ready bool) error { actions <- ready; return nil }}}
-				p.eventCh <- event.Event{CfgName: "pending"}
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					p.applySourceQualification(event.SourceQualification{Generation: 7, Revision: 3, Ready: true})
-				}()
-				t.Cleanup(func() { cancel(); <-done })
-				synctest.Wait()
-				select {
-				case ready := <-actions:
-					require.True(t, ready, "input enable must be applied")
-				default:
-					t.Fatal("input enable was not applied")
-				}
-				select {
-				case <-done:
-					t.Fatal("state-bearing acknowledgement was dropped")
-				default:
-				}
-				require.True(t, p.sourceQualification.mu.TryLock(), "delivery must not hold the action mutex")
-				p.sourceQualification.mu.Unlock()
-				switch outcome {
-				case "delivery":
-					require.Equal(t, "pending", (<-p.eventCh).CfgName)
-					select {
-					case ev := <-p.eventCh:
-						require.Equal(t, &event.PTPSourceApplied{Generation: 7, Revision: 3, Enabled: true}, ev.Data)
-					case <-time.After(time.Second):
-						t.Fatal("acknowledgement payload was not delivered after capacity became available")
-					}
-				case "cancel":
-					cancel()
-				case "close":
-					p.sourceQualification.close()
-				}
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-					t.Fatal("acknowledgement sender did not stop")
 				}
 			})
 		})

@@ -44,14 +44,42 @@ func TestSourceQualificationTransitionLogs(t *testing.T) {
 	p := &ptpProcess{
 		ExecProcess:         ExecProcess{name: event.Ptp4lProcessName, configName: "ptp4l.0.config", eventCh: make(chan event.Event, 8)},
 		nodeProfile:         &ptpv1.PtpProfile{Name: utils.ToPtr("source-log-test")},
-		tBCAttributes:       tBCProcessAttributes{activePort: "tr0", trIfaceNames: []string{"tr0"}},
+		tBCAttributes:       tBCProcessAttributes{trIfaceNames: []string{"tr0"}},
 		sourceQualification: &sourceQualificationRuntime{apply: func(bool) error { return nil }},
 	}
-	attachQualificationClock(t, p, utils.QualificationConfig{QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 2, DisqualifiedSamples: 1})
+	cm := attachQualificationClock(t, p, utils.QualificationConfig{QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 2, DisqualifiedSamples: 1})
 	p.forwardSourceData(nil, &parser.PTPEvent{Iface: "tr0", Role: parserconstants.PortRoleSlave})
 	p.observeSource("", &event.PTPSourceObservation{Selection: parserconstants.BMCAExternal})
 	for _, offset := range []float64{10, 10, 10, 201, 201} {
 		p.forwardSourceData(&parser.Metrics{Iface: "tr0", Offset: offset, ServoState: "s2"}, nil)
 	}
+	bmcaSnapshot(t, p, cm)
+	glog.Flush()
+}
+
+func TestPTP4lOffsetOverflowLogs(t *testing.T) {
+	if os.Getenv("PTP_OFFSET_OVERFLOW_LOG_CHILD") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPTP4lOffsetOverflowLogs$", "-logtostderr=true")
+		cmd.Env = append(os.Environ(), "PTP_OFFSET_OVERFLOW_LOG_CHILD=1")
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		require.Contains(t, string(output), "PTP4L OFFSET EVENT CHANNEL FULL for ptp4l.0.config: DROPPING offset 42")
+		require.Equal(t, 1, strings.Count(string(output), "PTP4L OFFSET EVENT CHANNEL FULL"))
+		return
+	}
+	p := &ptpProcess{
+		ExecProcess: ExecProcess{configName: "ptp4l.0.config", eventCh: make(chan event.Event, 1)},
+		tBCAttributes: tBCProcessAttributes{trPortsConfigFile: "ptp4l.0.config",
+			offsetEventWindow: utils.NewWindow(1)},
+		offset: 42,
+	}
+	p.eventCh <- event.Event{CfgName: "occupied"}
+	p.sendPtp4lOffsetEvent()
+	require.Equal(t, "occupied", (<-p.eventCh).CfgName)
+	p.tBCAttributes.lastOffsetEventSec = 0
+	p.sendPtp4lOffsetEvent()
+	require.EqualValues(t, 42, (<-p.eventCh).Data.(*event.OffsetData).Offset)
 	glog.Flush()
 }

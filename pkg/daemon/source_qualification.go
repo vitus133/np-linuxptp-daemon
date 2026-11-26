@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/clock"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/event"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/hardwareconfig"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/parser"
@@ -25,16 +25,13 @@ type sourceQualificationPolicy struct {
 }
 
 type sourceQualificationRuntime struct {
-	mu           sync.Mutex // teardown waits for an in-flight hardware action
-	closed       bool
-	generation   uint64
-	ctx          context.Context
-	done         chan struct{}
-	apply        func(bool) error
-	desired      event.SourceQualification
-	desiredKnown bool
-	applied      bool
-	appliedKnown bool
+	mu         sync.Mutex
+	closed     bool
+	generation uint64
+	clockID    string
+	ctx        context.Context
+	apply      func(bool) error
+	actions    *clock.SourceInputActions
 }
 
 func (p *ptpProcess) configureSourceQualification(policy sourceQualificationPolicy) error {
@@ -52,9 +49,17 @@ func (p *ptpProcess) configureSourceQualification(policy sourceQualificationPoli
 	if err != nil {
 		return err
 	}
-	p.sourceQualification = &sourceQualificationRuntime{
+	clockID := ""
+	if p.nodeProfile != nil {
+		var clockIDErr error
+		clockID, clockIDErr = p.getPTPClockID()
+		if clockIDErr != nil {
+			glog.Error(clockIDErr)
+		}
+	}
+	q := &sourceQualificationRuntime{
 		generation: generation,
-		done:       make(chan struct{}),
+		clockID:    clockID,
 		apply: func(ready bool) error {
 			condition := hardwareconfig.ConditionTypeLost
 			if ready {
@@ -82,6 +87,24 @@ func (p *ptpProcess) configureSourceQualification(policy sourceQualificationPoli
 			return errors.Join(failures...)
 		},
 	}
+	p.sourceQualification = q
+	actions, err := p.dn.processManager.clockMgr.SetSourceInputAction(p.configName, generation, getProfileName(p.nodeProfile), func(ready bool) error {
+		q.mu.Lock()
+		apply, ctx, closed := q.apply, q.ctx, q.closed
+		q.mu.Unlock()
+		if apply == nil || (ready && (closed || (ctx != nil && ctx.Err() != nil))) {
+			return nil
+		}
+		return apply(ready)
+	})
+	if err != nil {
+		q.close()
+		p.sourceQualification = nil
+		return err
+	}
+	q.mu.Lock()
+	q.actions = actions
+	q.mu.Unlock()
 	th := getPTPThreshold(p.nodeProfile)
 	glog.Infof("Source qualification profile=%s config=%s S3=%t thresholds=%d/%d samples=%d/%d thresholdFallbacks=%t/%t",
 		getProfileName(p.nodeProfile), p.configName, policy.config.UseS3,
@@ -93,7 +116,7 @@ func (p *ptpProcess) configureSourceQualification(policy sourceQualificationPoli
 }
 
 // forwardSourceData forwards fresh parser facts before metrics mutate them. The
-// clock evaluates readiness; input actions are serialized here.
+// clock evaluates readiness and controls input actions.
 func (p *ptpProcess) forwardSourceData(metrics *parser.Metrics, portEvent *parser.PTPEvent) {
 	q := p.sourceQualification
 	if q == nil || p.name != event.Ptp4lProcessName {
@@ -103,20 +126,13 @@ func (p *ptpProcess) forwardSourceData(metrics *parser.Metrics, portEvent *parse
 		if portEvent.ConfigName != p.configName {
 			return // Only the TR instance's own BMCA result controls its source.
 		}
-		clockID, err := p.getPTPClockID()
-		if err != nil {
-			glog.Error(err)
-		}
-		p.observeSource("", &event.PTPSourceObservation{Selection: portEvent.BMCASelection, ClockID: clockID})
+		p.observeSource("", &event.PTPSourceObservation{Selection: portEvent.BMCASelection, ClockID: q.clockID})
 		return
 	}
 	if portEvent != nil && portEvent.Role != parserconstants.PortRoleUnknown {
 		port := portEvent.Iface
 		if port == "" && portEvent.PortID > 0 && portEvent.PortID <= len(p.ifaces) {
 			port = p.ifaces[portEvent.PortID-1].Name
-		}
-		if portEvent.Role == parserconstants.PortRoleSlave && slices.Contains(p.tBCAttributes.trIfaceNames, port) {
-			p.tBCAttributes.activePort = port
 		}
 		p.observeSource(port, &event.PTPSourceObservation{PortRole: utils.ToPtr(portEvent.Role)})
 	}
@@ -130,95 +146,19 @@ func (p *ptpProcess) forwardSourceData(metrics *parser.Metrics, portEvent *parse
 func (p *ptpProcess) observeSource(port string, observation *event.PTPSourceObservation) {
 	q := p.sourceQualification
 	q.mu.Lock()
-	if q.closed {
+	if q.closed || (q.ctx != nil && q.ctx.Err() != nil) {
 		q.mu.Unlock()
 		return
 	}
 	observation.Generation = q.generation
-	ctx := q.ctx
-	q.mu.Unlock()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	observation.Reply = make(chan event.SourceQualification, 1)
 	ev := event.Event{Source: event.PTP4l, CfgName: p.configName, IFace: port, ClockType: p.clockType, Time: time.Now().UnixMilli(), Data: observation}
-	if observation.Selection != parserconstants.BMCAUnknown || observation.PortRole != nil || observation.SourceLost {
-		// These transitions may not repeat. Wait for delivery, but allow daemon
-		// shutdown to release a sender whose consumer has stopped.
-		select {
-		case p.eventCh <- ev:
-		case <-ctx.Done():
-			return
-		case <-q.done:
-			return
-		}
-	} else {
-		select {
-		case p.eventCh <- ev:
-		case <-ctx.Done():
-			return
-		case <-q.done:
-			return
-		default:
-			glog.Errorf("source qualification event channel full for %s[%s]; dropping observation", p.name, p.configName)
-			return
-		}
-	}
 	select {
-	case result := <-observation.Reply:
-		if result.SourceType == event.PTP4l {
-			p.applySourceQualification(result)
-		}
-	case <-ctx.Done():
-	case <-q.done:
-	}
-}
-
-func (p *ptpProcess) applySourceQualification(result event.SourceQualification) {
-	q := p.sourceQualification
-	q.mu.Lock()
-	if q.closed || result.Generation != q.generation || (q.desiredKnown && result.Revision < q.desired.Revision) {
+	case p.eventCh <- ev:
 		q.mu.Unlock()
 		return
-	}
-	// Compare desired states so a failed action is not repeated by later samples.
-	inputChanged := !q.desiredKnown || q.desired.Ready != result.Ready
-	q.desired, q.desiredKnown = result, true
-	p.tBCAttributes.activePort = result.IFace // label existing state/averaged-offset events
-	if result.Changed {
-		glog.Infof("PTPSourceQualified profile=%s config=%s source=%s port=%s qualified=%t reason=%q samples=%d",
-			getProfileName(p.nodeProfile), p.configName, result.SourceType, result.IFace, result.Qualified, result.Reason, result.Samples)
-	}
-	ctx := q.ctx
-	var ack *event.PTPSourceApplied
-	if inputChanged && (ctx == nil || ctx.Err() == nil) {
-		if err := q.apply(result.Ready); err != nil {
-			q.appliedKnown = false // A failed write may have partially programmed pins.
-			glog.Errorf("PTPSourceQualified hardware apply profile=%s ready=%t: %v", getProfileName(p.nodeProfile), result.Ready, err)
-		} else {
-			q.applied, q.appliedKnown = result.Ready, true
-			if result.Ready {
-				ack = &event.PTPSourceApplied{Generation: result.Generation, Revision: result.Revision, Enabled: true}
-			}
-		}
-	}
-	q.mu.Unlock()
-	p.sendSourceInputApplied(ctx, ack)
-}
-
-func (p *ptpProcess) sendSourceInputApplied(ctx context.Context, ack *event.PTPSourceApplied) {
-	if ack == nil {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// Action acknowledgements, like BMCA decisions, are state-bearing facts.
-	// Never drop them or hold q.mu while waiting for the event forwarder.
-	select {
-	case p.eventCh <- event.Event{Source: event.PTP4l, CfgName: p.configName, ClockType: p.clockType, Time: time.Now().UnixMilli(), Data: ack}:
-	case <-ctx.Done():
-	case <-p.sourceQualification.done:
+	default:
+		q.mu.Unlock()
+		glog.Errorf("SOURCE EVENT CHANNEL FULL for %s[%s]: DROPPING event %s", p.name, p.configName, observation)
 	}
 }
 
@@ -231,13 +171,14 @@ func (p *ptpProcess) invalidateSourceQualification() {
 
 func (q *sourceQualificationRuntime) close() {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.closed {
-		return
+	if !q.closed {
+		q.closed = true
 	}
-	q.closed = true
-	if q.done != nil {
-		close(q.done)
+	actions := q.actions
+	generation := q.generation
+	q.mu.Unlock()
+	if actions != nil {
+		actions.CloseGeneration(generation)
 	}
 }
 

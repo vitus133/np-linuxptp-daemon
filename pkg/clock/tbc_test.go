@@ -1178,7 +1178,6 @@ func TestTBCBMCAOverridesStaleLockedPort(t *testing.T) {
 		observation.Generation = bc.ptpSource.generation
 		return bc.ObserveSource(event.Event{Source: event.PTP4l, CfgName: cfg}, &observation)
 	}
-	oldRevision := bc.ptpSource.revision
 	assert.Empty(t, observe("ptp4l.9.config", event.PTPSourceObservation{Selection: parserconstants.BMCALocal}).SourceType)
 	assert.Equal(t, event.PTP_LOCKED, bc.GetState(), "another config cannot change source selection")
 
@@ -1205,17 +1204,11 @@ func TestTBCBMCAOverridesStaleLockedPort(t *testing.T) {
 	assert.Equal(t, event.PTP_HOLDOVER, bc.GetState(), "synthetic LOCKED cannot change BMCA selection")
 	assert.False(t, observe(testPTP4lCfg, event.PTPSourceObservation{ServoState: "s2", Offset: 10}).Ready)
 
-	// External selection is necessary, but is neither fresh quality evidence nor
-	// a successful input action. Only all three permit aggregate recovery.
+	// External selection is necessary, but fresh quality evidence is also required.
 	assert.False(t, observe(testPTP4lCfg, event.PTPSourceObservation{Selection: parserconstants.BMCAExternal}).Ready)
 	result = observe(testPTP4lCfg, event.PTPSourceObservation{ServoState: "s2", Offset: 10})
 	require.True(t, result.Ready)
-	assert.Equal(t, event.PTP_HOLDOVER, bc.GetState(), "a failed/missing locked apply must not recover the clock")
-	ack := event.Event{Source: event.PTP4l, CfgName: testPTP4lCfg,
-		Data: &event.PTPSourceApplied{Generation: result.Generation, Revision: oldRevision, Enabled: true}}
-	assert.Equal(t, event.PTP_HOLDOVER, bc.AddEvent(ack).State, "an old successful action cannot acknowledge recovery")
-	ack.Data.(*event.PTPSourceApplied).Revision = result.Revision
-	assert.Equal(t, event.PTP_LOCKED, bc.AddEvent(ack).State)
+	assert.Equal(t, event.PTP_LOCKED, bc.GetState(), "healthy DPLL and offsets permit recovery")
 
 	observe(testPTP4lCfg, event.PTPSourceObservation{Selection: parserconstants.BMCALocal})
 	assert.Equal(t, event.PTP_HOLDOVER, bc.GetState())
@@ -1601,9 +1594,7 @@ func setTBCSourceReadyForTest(bc *TBC, ready bool) SyncState {
 	}
 	bc.ObserveSource(event.Event{Source: event.PTP4l, CfgName: bc.cfgName}, &event.PTPSourceObservation{
 		Generation: generation, Selection: parserconstants.BMCAExternal})
-	result := bc.ObserveSource(event.Event{Source: event.PTP4l, CfgName: bc.cfgName}, &event.PTPSourceObservation{
+	bc.ObserveSource(event.Event{Source: event.PTP4l, CfgName: bc.cfgName}, &event.PTPSourceObservation{
 		Generation: generation, ServoState: "s2", Offset: 10})
-	bc.AddEvent(event.Event{Source: event.PTP4l, CfgName: bc.cfgName,
-		Data: &event.PTPSourceApplied{Generation: generation, Revision: result.Revision, Enabled: true}})
 	return bc.GetSyncState()
 }

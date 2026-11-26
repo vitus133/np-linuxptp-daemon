@@ -186,11 +186,7 @@ func (d *OffsetData) String() string {
 }
 
 // PTPSourceObservation is a fresh upstream PTP fact, before offset averaging.
-// Event identifies the local contributor, config and physical interface. Reply
-// must be buffered (capacity one); it lets the scanner apply hardware changes
-// after clock evaluation, without running hardware I/O under the manager lock.
-// BMCA replies may be deferred until profile apply finishes; callers must allow
-// shutdown to cancel their reply wait.
+// Event identifies the local contributor, config and physical interface.
 type PTPSourceObservation struct {
 	Generation uint64
 	Selection  parserconstants.BMCASelection
@@ -199,7 +195,6 @@ type PTPSourceObservation struct {
 	ServoState string
 	SourceLost bool
 	ClockID    string
-	Reply      chan SourceQualification
 }
 
 func (*PTPSourceObservation) eventData() {}
@@ -220,23 +215,8 @@ type SourceQualification struct {
 	SourceType EventSource
 	IFace      string
 	Generation uint64
-	Revision   uint64
 	Ready      bool // External BMCA reference selected and its timing stream qualified.
 	utils.QualificationResult
-}
-
-// PTPSourceApplied acknowledges a successful input action, not a BMCA decision
-// or a quality measurement. Revision rejects an action superseded by source loss.
-type PTPSourceApplied struct {
-	Generation uint64
-	Revision   uint64
-	Enabled    bool
-}
-
-func (*PTPSourceApplied) eventData() {}
-
-func (d *PTPSourceApplied) String() string {
-	return fmt.Sprintf("PTP source input generation=%d revision=%d enabled=%t", d.Generation, d.Revision, d.Enabled)
 }
 
 // DPLLData is a DPLL status sample. Offset/PhaseStatus/FrequencyStatus are nil when FlagNo* is set.

@@ -2,6 +2,7 @@ package clockmgr
 
 import (
 	"testing"
+	"time"
 
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/alias"
 	"github.com/k8snetworkplumbingwg/linuxptp-daemon/pkg/clock"
@@ -131,11 +132,25 @@ func TestPTPSourceClockStateMetricsFollowSelectedPort(t *testing.T) {
 			generation, err := cm.ConfigureSourceQualification(testClockmgrPtp4lConfig, []string{"tr0", "tr1"}, utils.QualificationConfig{
 				QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 2, DisqualifiedSamples: 1})
 			require.NoError(t, err)
-			observe := func(iface string, observation event.PTPSourceObservation) event.SourceQualification {
+			actions := make(chan bool, 10)
+			worker, err := cm.SetSourceInputAction(testClockmgrPtp4lConfig, generation, "test", func(ready bool) error {
+				actions <- ready
+				return nil
+			})
+			require.NoError(t, err)
+			t.Cleanup(worker.Close)
+			waitActions := func() {
+				if done := worker.Done(); done != nil {
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						t.Fatal("source input actions did not finish")
+					}
+				}
+			}
+			observe := func(iface string, observation event.PTPSourceObservation) {
 				observation.Generation = generation
-				observation.Reply = make(chan event.SourceQualification, 1)
 				cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: iface, Data: &observation})
-				return <-observation.Reply
 			}
 			oldLabels := prometheus.Labels{processLabel: "ptp4l", nodeLabel: "testnode", ifaceLabel: "tr0-alias"}
 			newLabels := prometheus.Labels{processLabel: "ptp4l", nodeLabel: "testnode", ifaceLabel: "tr1-alias"}
@@ -157,25 +172,27 @@ func TestPTPSourceClockStateMetricsFollowSelectedPort(t *testing.T) {
 			// from the accepted selected port.
 			observe("tr1", event.PTPSourceObservation{PortRole: utils.ToPtr(parserconstants.PortRoleMaster)})
 			observe("not-upstream", event.PTPSourceObservation{PortRole: utils.ToPtr(parserconstants.PortRoleSlave)})
-			stale := &event.PTPSourceObservation{Generation: generation + 1, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
+			stale := &event.PTPSourceObservation{Generation: generation + 1, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
 			cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr1", Data: stale})
-			require.Empty(t, (<-stale.Reply).SourceType)
 			beforeSource, ok := cm.SourceQualification(testClockmgrPtp4lConfig)
 			require.True(t, ok)
 			beforeState := cm.GetClock(testClockmgrPtp4lConfig).(*clock.TBC).GetSyncState()
 			cm.SetApplying(true)
-			result := observe("tr1", event.PTPSourceObservation{PortRole: utils.ToPtr(parserconstants.PortRoleSlave)})
-			require.Empty(t, result.SourceType, "a label-only change must not trigger an input hardware action")
+			waitActions()
+			beforeActions := len(actions)
+			observe("tr1", event.PTPSourceObservation{PortRole: utils.ToPtr(parserconstants.PortRoleSlave)})
 			requireGaugeValue(t, gauge, oldLabels, tc.state)
 			require.False(t, gauge.Delete(newLabels))
 			cm.SetApplying(false)
+			waitActions()
+			require.Len(t, actions, beforeActions, "a label-only change must not trigger an input hardware action")
 			require.False(t, gauge.Delete(oldLabels), "the old port's state series must be removed without waiting for another sample")
 			require.NotContains(t, cm.metricCache, metricKey{cfgName: testClockmgrPtp4lConfig, process: "ptp4l", iface: "tr0-alias", dataType: "clock_state"})
 			requireGaugeValue(t, gauge, newLabels, tc.state)
 			afterSource, ok := cm.SourceQualification(testClockmgrPtp4lConfig)
 			require.True(t, ok)
 			beforeSource.IFace = "tr1"
-			require.Equal(t, beforeSource, afterSource, "port reselection must preserve qualification and its generation/revision")
+			require.Equal(t, beforeSource, afterSource, "port reselection must preserve qualification and its generation")
 			require.Equal(t, beforeState, cm.GetClock(testClockmgrPtp4lConfig).(*clock.TBC).GetSyncState(), "a label-only change must not evaluate aggregate clock state")
 			observe("tr1", event.PTPSourceObservation{ServoState: "s2", Offset: 10})
 			requireGaugeValue(t, gauge, newLabels, event.ClockStateLocked)
@@ -197,10 +214,8 @@ func TestSourcePortRolesCoalesceBetweenBMCASelections(t *testing.T) {
 		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
 	require.NoError(t, err)
 	role := func(iface string) {
-		observation := &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
+		observation := &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
 		cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: iface, Data: observation})
-		require.Len(t, observation.Reply, 1)
-		require.Empty(t, (<-observation.Reply).SourceType)
 	}
 	cm.SetApplying(true)
 	for i := 0; i < 100; i++ {
@@ -210,7 +225,7 @@ func TestSourcePortRolesCoalesceBetweenBMCASelections(t *testing.T) {
 	}
 	role("not-upstream")
 	require.Len(t, cm.pendingSourceObservations, 3, "repeated roles must not grow the apply queue")
-	selection := &event.PTPSourceObservation{Generation: generation, Selection: parserconstants.BMCAExternal, Reply: make(chan event.SourceQualification, 1)}
+	selection := &event.PTPSourceObservation{Generation: generation, Selection: parserconstants.BMCAExternal}
 	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, Data: selection})
 	for i := 0; i < 100; i++ {
 		role("tr1")
@@ -219,12 +234,80 @@ func TestSourcePortRolesCoalesceBetweenBMCASelections(t *testing.T) {
 	}
 	role("not-upstream")
 	require.Len(t, cm.pendingSourceObservations, 7, "roles on either side of BMCA must remain ordered")
+	require.Equal(t, "tr1", cm.pendingSourceObservations[1].IFace, "the last valid port before BMCA must be retained")
 	cm.SetApplying(false)
-	require.Len(t, selection.Reply, 1)
-	require.Equal(t, "tr1", (<-selection.Reply).IFace)
 	source, exists := cm.SourceQualification(testClockmgrPtp4lConfig)
 	require.True(t, exists)
 	require.Equal(t, "tr0", source.IFace)
+}
+
+func TestPTPSourceOffsetUsesClockSelectedPort(t *testing.T) {
+	cm, _ := newProcessMetricManager(t, event.TBC)
+	cm.offsetMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "test_ptp_selected_source_offset_ns"},
+		[]string{fromLabel, processLabel, nodeLabel, ifaceLabel})
+	generation, err := cm.ConfigureSourceQualification(testClockmgrPtp4lConfig, []string{"tr0", "tr1"}, utils.QualificationConfig{
+		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
+	require.NoError(t, err)
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr1",
+		Data: &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}})
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr0",
+		Data: &event.OffsetData{Offset: 17}})
+	requireGaugeValue(t, cm.offsetMetric, prometheus.Labels{
+		fromLabel: "ptp4l", processLabel: "ptp4l", nodeLabel: "testnode", ifaceLabel: "tr1",
+	}, 17)
+}
+
+func TestSourceObservationOverflowDuringApplyDropsEvent(t *testing.T) {
+	cm, _ := newProcessMetricManager(t, event.TBC)
+	generation, err := cm.ConfigureSourceQualification(testClockmgrPtp4lConfig, []string{"tr0"}, utils.QualificationConfig{
+		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
+	require.NoError(t, err)
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr0",
+		Data: &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}})
+	cm.SetApplying(true)
+	for i := 0; i <= maxPendingSourceObservations; i++ {
+		selection := parserconstants.BMCAExternal
+		if i%2 != 0 {
+			selection = parserconstants.BMCALocal
+		}
+		cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig,
+			Data: &event.PTPSourceObservation{Generation: generation, Selection: selection}})
+	}
+	require.Len(t, cm.pendingSourceObservations, maxPendingSourceObservations)
+	last := cm.pendingSourceObservations[maxPendingSourceObservations-1].Data.(*event.PTPSourceObservation)
+	require.Equal(t, parserconstants.BMCALocal, last.Selection, "the overflowed external selection must be dropped")
+	cm.SetApplying(false)
+	source, exists := cm.SourceQualification(testClockmgrPtp4lConfig)
+	require.True(t, exists)
+	require.Equal(t, "tr0", source.IFace)
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr0",
+		Data: &event.PTPSourceObservation{Generation: generation, ServoState: "s2", Offset: 10}})
+	source, exists = cm.SourceQualification(testClockmgrPtp4lConfig)
+	require.True(t, exists)
+	require.False(t, source.Ready)
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig,
+		Data: &event.PTPSourceObservation{Generation: generation, Selection: parserconstants.BMCAExternal}})
+	cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr0",
+		Data: &event.PTPSourceObservation{Generation: generation, ServoState: "s2", Offset: 10}})
+	source, exists = cm.SourceQualification(testClockmgrPtp4lConfig)
+	require.True(t, exists && source.Ready, "later events must still be processed")
+}
+
+func TestSourceReadinessDoesNotRequireHardwareHandler(t *testing.T) {
+	cm, _ := newProcessMetricManager(t, event.TBC)
+	generation, err := cm.ConfigureSourceQualification(testClockmgrPtp4lConfig, []string{"tr0"}, utils.QualificationConfig{
+		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
+	require.NoError(t, err)
+	for _, observation := range []*event.PTPSourceObservation{
+		{Generation: generation, Selection: parserconstants.BMCAExternal},
+		{Generation: generation, ServoState: "s2", Offset: 10},
+		{Generation: generation, ServoState: "s2", Offset: 10},
+	} {
+		cm.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: testClockmgrPtp4lConfig, IFace: "tr0", Data: observation})
+	}
+	source, exists := cm.SourceQualification(testClockmgrPtp4lConfig)
+	require.True(t, exists)
+	require.True(t, source.Ready)
 }
 
 func TestSyncEClockStateMetrics(t *testing.T) {

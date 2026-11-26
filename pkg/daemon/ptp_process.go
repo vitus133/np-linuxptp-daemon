@@ -135,31 +135,25 @@ func (p *ptpProcess) sendPtp4lOffsetEvent() {
 	p.tBCAttributes.lastOffsetEventSec = nowSec
 
 	avgOffset := int64(p.tBCAttributes.offsetEventWindow.Mean())
-	state := event.PTP_NOTSET
-	if q := p.sourceQualification; q != nil {
-		q.mu.Lock()
-		if q.desiredKnown {
-			state = event.PTP_FREERUN
-			if q.desired.Ready && q.appliedKnown && q.applied {
-				state = event.PTP_LOCKED
-			}
-		}
-		q.mu.Unlock()
+	iface := ""
+	if len(p.tBCAttributes.trIfaceNames) > 0 {
+		iface = p.tBCAttributes.trIfaceNames[0]
 	}
 	glog.Infof("PTP4l offset event: %d", avgOffset)
 	select {
 	case p.eventCh <- event.Event{
 		Source:    event.PTP4l,
 		CfgName:   p.configName,
-		IFace:     p.tBCAttributes.activeTRPort(),
+		IFace:     iface,
 		ClockType: p.clockType,
 		Time:      time.Now().UnixMilli(),
 		Data: &event.OffsetData{
-			State:  state,
+			State:  event.PTP_NOTSET,
 			Offset: avgOffset,
 		},
 	}:
 	default:
+		glog.Errorf("PTP4L OFFSET EVENT CHANNEL FULL for %s: DROPPING offset %d", p.configName, avgOffset)
 	}
 }
 
@@ -221,7 +215,6 @@ func (p *ptpProcess) Start(ctx context.Context) error {
 		}
 		q.mu.Lock()
 		q.generation, q.ctx = result.Generation, ctx
-		q.appliedKnown, q.desiredKnown = false, false
 		q.mu.Unlock()
 	}
 	p.run()
@@ -672,20 +665,9 @@ func (p *ptpProcess) getPTPClockID() (string, error) {
 type tBCProcessAttributes struct {
 	trPortsConfigFile string
 	trIfaceNames      []string
-	activePort        string
 	// offsetEventWindow averages ptp4l offsets and sends them to the T-BC state machine once per second
 	offsetEventWindow  *utils.Window
 	lastOffsetEventSec int64
-}
-
-func (t *tBCProcessAttributes) activeTRPort() string {
-	if t.activePort != "" {
-		return t.activePort
-	}
-	if len(t.trIfaceNames) > 0 {
-		return t.trIfaceNames[0]
-	}
-	return ""
 }
 
 func buildPtpCmdLine(name, configPath string, opts *string, nodeProfile *ptpv1.PtpProfile) string {

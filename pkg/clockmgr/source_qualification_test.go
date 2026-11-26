@@ -1,6 +1,7 @@
 package clockmgr_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,72 @@ func TestSourceQualificationSnapshots(t *testing.T) {
 	require.Empty(t, m.StatsUpdatesCh(), "removed owner cannot publish another snapshot")
 }
 
+func TestSourceInputActionTeardownDoesNotHoldManagerLock(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(map[bool]string{false: "remove", true: "replace"}[replace], func(t *testing.T) {
+			m := clockmgr.Init("test", make(chan event.Event), nil, nil, nil, nil)
+			qualificationPublisher(t, m)
+			source, exists := m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists)
+			started, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			var releaseOnce sync.Once
+			finish := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(finish)
+			_, err := m.SetSourceInputAction("ptp4l.0.config", source.Generation, "test", func(bool) error {
+				close(started)
+				<-release
+				m.SourceQualification("ptp4l.0.config")
+				return nil
+			})
+			require.NoError(t, err)
+			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config",
+				Data: &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal}})
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("input action did not start")
+			}
+			go func() {
+				if replace {
+					clk, err := clock.NewTBC("ptp4l.0.config", m.GetUtcOffset, &pmc.MockClient{}, "ptp4.1.config")
+					if err == nil {
+						err = m.AddClock(clk)
+					}
+					done <- err
+				} else {
+					m.RemoveAllClocks()
+					done <- nil
+				}
+			}()
+			time.Sleep(10 * time.Millisecond)
+			finish()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("clock teardown deadlocked with the input action")
+			}
+		})
+	}
+}
+
+func TestSourceInputActionRejectsObsoleteGeneration(t *testing.T) {
+	m := clockmgr.Init("test", make(chan event.Event), nil, nil, nil, nil)
+	qualificationPublisher(t, m)
+	old, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	generation, err := m.ConfigureSourceQualification("ptp4l.0.config", []string{"tr0"}, utils.QualificationConfig{
+		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 1, DisqualifiedSamples: 1})
+	require.NoError(t, err)
+	_, err = m.SetSourceInputAction("ptp4l.0.config", old.Generation, "old", func(bool) error { return nil })
+	require.Error(t, err)
+	_, err = m.SetSourceInputAction("ptp4l.0.config", generation, "new", nil)
+	require.Error(t, err)
+	actions, err := m.SetSourceInputAction("ptp4l.0.config", generation, "new", func(bool) error { return nil })
+	require.NoError(t, err)
+	t.Cleanup(actions.Close)
+}
+
 func qualificationPublisher(t *testing.T, m *clockmgr.ClockManager) func(bool) {
 	t.Helper()
 	clk, err := clock.NewTBC("ptp4l.0.config", m.GetUtcOffset, &pmc.MockClient{}, "ptp4.1.config")
@@ -76,8 +143,8 @@ func TestSourceQualificationEventRoundTrip(t *testing.T) {
 	generation, err := m.ConfigureSourceQualification("ptp4l.0.config", []string{"tr0"}, utils.QualificationConfig{
 		QualifiedThreshold: 100, DisqualifiedThreshold: 200, QualifiedSamples: 2, DisqualifiedSamples: 1})
 	require.NoError(t, err)
-	role := &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
-	sample := &event.PTPSourceObservation{Generation: generation, ServoState: "s2", Offset: 10, Reply: make(chan event.SourceQualification, 1)}
+	role := &event.PTPSourceObservation{Generation: generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
+	sample := &event.PTPSourceObservation{Generation: generation, ServoState: "s2", Offset: 10}
 	wrap := func(data event.EventData) event.Event {
 		return event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: data}
 	}
@@ -85,69 +152,62 @@ func TestSourceQualificationEventRoundTrip(t *testing.T) {
 	events <- wrap(sample)
 	require.False(t, clockmgr.SnapshotStatsForTest(m, []process.StatsRequest{{ClockID: "ptp4l.0.config"}}).SourceQualified["ptp4l.0.config"], "queued observations are not evaluated readiness")
 	m.ProcessEvent(<-events)
-	require.Empty(t, (<-role.Reply).SourceType, "role changes do not evaluate qualification")
 	selected, exists := m.SourceQualification("ptp4l.0.config")
 	require.True(t, exists)
 	require.Equal(t, "tr0", selected.IFace)
 	require.False(t, selected.Qualified)
 	m.ProcessEvent(wrap(&event.PTPSourceObservation{Generation: generation, Selection: parserconstants.BMCAExternal}))
 	m.ProcessEvent(<-events)
-	result := <-sample.Reply
+	result, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
 	require.False(t, result.Qualified)
 	require.Equal(t, clock.PTPInstanceSource{ConfigName: "ptp4l.0.config", Generation: generation}, result.Source)
 	m.ProcessEvent(wrap(&event.OffsetData{State: event.PTP_LOCKED, Offset: 10}))
 	require.False(t, clockmgr.SnapshotStatsForTest(m, []process.StatsRequest{{ClockID: "ptp4l.0.config"}}).SourceQualified["ptp4l.0.config"], "averaged offsets must not count as fresh qualification samples")
 	m.ProcessEvent(wrap(sample))
-	require.True(t, (<-sample.Reply).Qualified)
+	result, exists = m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists && result.Qualified)
 	m.SetApplying(true)
 	m.ProcessEvent(wrap(sample))
-	require.Empty(t, (<-sample.Reply).SourceType, "suppressed input still gets a rejection reply")
+	require.False(t, receiveStatsSnapshot(t, m.StatsUpdatesCh()).SourceQualified["ptp4l.0.config"], "ordinary samples are suppressed during apply")
 	m.SetApplying(false)
 	m.RemoveAllClocks()
 	m.ProcessEvent(wrap(sample))
-	require.Empty(t, (<-sample.Reply).SourceType, "removed clocks must not strand their old scanner")
+	_, exists = m.SourceQualification("ptp4l.0.config")
+	require.False(t, exists, "removed clocks must ignore their old scanner")
 }
 
-func receiveQualificationReply(t *testing.T, replies <-chan event.SourceQualification) event.SourceQualification {
-	t.Helper()
-	select {
-	case result := <-replies:
-		return result
-	case <-time.After(time.Second):
-		t.Fatal("source observation did not receive a reply")
-		return event.SourceQualification{}
-	}
-}
-
-func TestSourceQualificationBMCAWaitsForApply(t *testing.T) {
+func TestSourceQualificationBMCARetainedDuringApply(t *testing.T) {
 	for _, selection := range []parserconstants.BMCASelection{parserconstants.BMCAExternal, parserconstants.BMCALocal} {
 		t.Run(string(selection), func(t *testing.T) {
 			m := clockmgr.Init("test", make(chan event.Event), nil, nil, nil, nil)
 			qualificationPublisher(t, m)
 			source, ok := m.SourceQualification("ptp4l.0.config")
 			require.True(t, ok)
-			observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: selection, Reply: make(chan event.SourceQualification, 1)}
+			observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: selection}
 			wrap := func(data event.EventData) event.Event {
 				return event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: data}
 			}
 
 			m.SetApplying(true)
 			m.ProcessEvent(wrap(observation))
-			require.Empty(t, observation.Reply, "a one-shot BMCA selection must wait for evaluation, not receive a rejection")
 			require.Equal(t, event.PTP_NOTSET, receiveStatsSnapshot(t, m.StatsUpdatesCh()).ClockStates["ptp4l.0.config"], "retention must not evaluate the clock during apply")
-			sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10, Reply: make(chan event.SourceQualification, 1)}
+			sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10}
 			m.ProcessEvent(wrap(sample))
-			require.Empty(t, receiveQualificationReply(t, sample.Reply).SourceType, "ordinary samples are still suppressed")
 
 			m.SetApplying(false)
-			result := receiveQualificationReply(t, observation.Reply)
-			require.Equal(t, event.PTP4l, result.SourceType)
+			result, exists := m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists)
 			require.Equal(t, source.Generation, result.Generation)
 			require.False(t, result.Ready, "suppressed samples must not count towards qualification")
 			m.ProcessEvent(wrap(sample))
-			require.Equal(t, selection == parserconstants.BMCAExternal, receiveQualificationReply(t, sample.Reply).Ready, "fresh samples must use the retained selection without another BMCA event")
+			result, exists = m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists)
+			require.Equal(t, selection == parserconstants.BMCAExternal, result.Ready, "fresh samples must use the retained selection without another BMCA event")
 			m.SetApplying(false)
-			require.Empty(t, observation.Reply, "the retained observation must receive exactly one reply")
+			replayed, exists := m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists)
+			require.Equal(t, result, replayed, "the retained observation must be evaluated only once")
 		})
 	}
 }
@@ -160,34 +220,30 @@ func TestSourceQualificationPortSelectionReplayedAfterApply(t *testing.T) {
 	require.NoError(t, err)
 	source, exists := m.SourceQualification("ptp4l.0.config")
 	require.True(t, exists)
-	role := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
-	selection := &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal, Reply: make(chan event.SourceQualification, 1)}
+	role := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
+	selection := &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal}
 	m.SetApplying(true)
 	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: role})
-	require.Empty(t, receiveQualificationReply(t, role.Reply).SourceType, "port metadata must not block the scanner")
-	*role.PortRole = parserconstants.PortRoleMaster // Reusing the acknowledged observation must not alter the replay.
+	*role.PortRole = parserconstants.PortRoleMaster // Reusing the observation must not alter the replay.
 	before, _ := m.SourceQualification("ptp4l.0.config")
 	require.Empty(t, before.IFace, "the clock must not change during apply")
 	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: selection})
-	require.Empty(t, selection.Reply)
-	laterRole := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
-	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr1", Data: laterRole})
-	require.Empty(t, receiveQualificationReply(t, laterRole.Reply).SourceType)
 	m.SetApplying(false)
-	require.Equal(t, "tr0", receiveQualificationReply(t, selection.Reply).IFace, "port selection must be replayed before BMCA")
-	after, _ := m.SourceQualification("ptp4l.0.config")
-	require.Equal(t, "tr1", after.IFace, "later port selections must retain their order")
-	require.Empty(t, role.Reply, "replaying an acknowledged port role must not send another reply")
-	require.Empty(t, laterRole.Reply)
-
+	after, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	require.Equal(t, "tr0", after.IFace, "port selection must be replayed before BMCA")
 	m.SetApplying(true)
-	obsolete := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave), Reply: make(chan event.SourceQualification, 1)}
+	laterRole := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
+	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr1", Data: laterRole})
+	m.SetApplying(false)
+	after, _ = m.SourceQualification("ptp4l.0.config")
+	require.Equal(t, "tr1", after.IFace, "later port selections must retain their order")
+	m.SetApplying(true)
+	obsolete := &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}
 	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: obsolete})
-	require.Empty(t, receiveQualificationReply(t, obsolete.Reply).SourceType)
 	m.RemoveAllClocks()
 	qualificationPublisher(t, m)
 	m.SetApplying(false)
-	require.Empty(t, obsolete.Reply, "an obsolete port observation must not be replayed")
 	replacement, exists := m.SourceQualification("ptp4l.0.config")
 	require.True(t, exists)
 	require.Empty(t, replacement.IFace, "an obsolete port must not affect a replacement clock")
@@ -201,22 +257,18 @@ func TestSourceQualificationBMCAApplyOrder(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, source.Ready)
 	m.SetApplying(true)
-	var observations []*event.PTPSourceObservation
 	for _, selection := range []parserconstants.BMCASelection{parserconstants.BMCALocal, parserconstants.BMCAExternal} {
-		observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: selection, Reply: make(chan event.SourceQualification, 1)}
-		observations = append(observations, observation)
+		observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: selection}
 		m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: observation})
-		require.Empty(t, observation.Reply)
 	}
 	m.SetApplying(false)
-	for _, observation := range observations {
-		result := receiveQualificationReply(t, observation.Reply)
-		require.Equal(t, event.PTP4l, result.SourceType)
-		require.False(t, result.Qualified, "the local selection must reset qualification before the subsequent external selection")
-	}
-	sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10, Reply: make(chan event.SourceQualification, 1)}
+	result, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	require.False(t, result.Qualified, "the local selection must reset qualification before the subsequent external selection")
+	sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10}
 	m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: sample})
-	require.True(t, receiveQualificationReply(t, sample.Reply).Ready, "the final external selection must be retained in arrival order")
+	result, exists = m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists && result.Ready, "the final external selection must be retained in arrival order")
 }
 
 func TestSourceQualificationPendingBMCAInvalidation(t *testing.T) {
@@ -247,23 +299,21 @@ func TestSourceQualificationPendingBMCAInvalidation(t *testing.T) {
 			qualificationPublisher(t, m)
 			source, ok := m.SourceQualification("ptp4l.0.config")
 			require.True(t, ok)
-			observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal, Reply: make(chan event.SourceQualification, 1)}
+			observation := &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal}
 			ev := event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: observation}
 			m.SetApplying(true)
 			m.ProcessEvent(ev)
-			require.Empty(t, observation.Reply)
 			tc.invalidate(t, m)
-			require.Empty(t, receiveQualificationReply(t, observation.Reply).SourceType, "invalidating a pending selection must release its old scanner during apply")
 			qualificationPublisher(t, m)
 			m.ProcessEvent(ev)
-			require.Empty(t, receiveQualificationReply(t, observation.Reply).SourceType, "late observations from an obsolete generation must be rejected immediately")
 			m.SetApplying(false)
-			require.Empty(t, observation.Reply, "invalidated observations must not be replayed")
 			source, ok = m.SourceQualification("ptp4l.0.config")
 			require.True(t, ok)
-			sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10, Reply: make(chan event.SourceQualification, 1)}
+			sample := &event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10}
 			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: sample})
-			require.False(t, receiveQualificationReply(t, sample.Reply).Ready, "an old selection must not establish availability in the replacement")
+			replacement, exists := m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists)
+			require.False(t, replacement.Ready, "an old selection must not establish availability in the replacement")
 		})
 	}
 }
@@ -275,18 +325,35 @@ func TestSourceQualificationPendingBMCASurvivesAggregateReset(t *testing.T) {
 			qualificationPublisher(t, m)
 			qualification, ok := m.SourceQualification("ptp4l.0.config")
 			require.True(t, ok)
-			observation := &event.PTPSourceObservation{Generation: qualification.Generation, Selection: parserconstants.BMCAExternal, Reply: make(chan event.SourceQualification, 1)}
+			observation := &event.PTPSourceObservation{Generation: qualification.Generation, Selection: parserconstants.BMCAExternal}
 			m.SetApplying(true)
 			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: observation})
 			m.ProcessEvent(event.Event{Source: source, CfgName: "ts2phc.0.config", Reset: true})
-			require.Empty(t, observation.Reply, "an aggregate-only reset must not discard a current PTP generation's selection")
 			m.SetApplying(false)
-			require.Equal(t, event.PTP4l, receiveQualificationReply(t, observation.Reply).SourceType)
-			sample := &event.PTPSourceObservation{Generation: qualification.Generation, ServoState: "s2", Offset: 10, Reply: make(chan event.SourceQualification, 1)}
+			sample := &event.PTPSourceObservation{Generation: qualification.Generation, ServoState: "s2", Offset: 10}
 			m.ProcessEvent(event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: sample})
-			require.True(t, receiveQualificationReply(t, sample.Reply).Ready)
+			result, exists := m.SourceQualification("ptp4l.0.config")
+			require.True(t, exists && result.Ready)
 		})
 	}
+}
+
+func TestSourceLossDuringApplyInvalidatesPendingSelection(t *testing.T) {
+	m := clockmgr.Init("test", make(chan event.Event), nil, nil, nil, nil)
+	qualificationPublisher(t, m)
+	source, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	wrap := func(observation *event.PTPSourceObservation) event.Event {
+		return event.Event{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: observation}
+	}
+	m.SetApplying(true)
+	m.ProcessEvent(wrap(&event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal}))
+	m.ProcessEvent(wrap(&event.PTPSourceObservation{Generation: source.Generation, SourceLost: true}))
+	m.SetApplying(false)
+	m.ProcessEvent(wrap(&event.PTPSourceObservation{Generation: source.Generation, ServoState: "s2", Offset: 10}))
+	after, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	require.False(t, after.Ready, "a source loss must invalidate an earlier pending selection")
 }
 
 func TestSourceQualificationApplyingRejectsUnrelatedObservations(t *testing.T) {
@@ -301,14 +368,15 @@ func TestSourceQualificationApplyingRejectsUnrelatedObservations(t *testing.T) {
 		{Source: event.TS2PHC, CfgName: "ptp4l.0.config", Data: &event.PTPSourceObservation{Generation: source.Generation, Selection: parserconstants.BMCAExternal}},
 		{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: &event.PTPSourceObservation{Generation: source.Generation + 1, Selection: parserconstants.BMCAExternal}},
 		{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleSlave)}},
-		{Source: event.PTP4l, CfgName: "ptp4l.0.config", Data: &event.PTPSourceObservation{Generation: source.Generation, SourceLost: true}},
+		{Source: event.PTP4l, CfgName: "ptp4l.0.config", IFace: "tr0", Data: &event.PTPSourceObservation{Generation: source.Generation, PortRole: utils.ToPtr(parserconstants.PortRoleMaster)}},
 	} {
-		observation := ev.Data.(*event.PTPSourceObservation)
-		observation.Reply = make(chan event.SourceQualification, 1)
 		m.ProcessEvent(ev)
-		require.Empty(t, receiveQualificationReply(t, observation.Reply).SourceType, "unrelated observations must not produce a qualification verdict")
 	}
 	m.SetApplying(false)
+	after, exists := m.SourceQualification("ptp4l.0.config")
+	require.True(t, exists)
+	require.False(t, after.Ready)
+	require.Empty(t, after.IFace, "unrelated observations must not select a port")
 }
 
 func TestSourceQualificationApplyPublishesReadiness(t *testing.T) {
